@@ -1,0 +1,72 @@
+name: Bug report
+description: Report broken loading, viewing, zooming, pagination, or downloads
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting a problem. Do not include passwords, cookies, tokens, or private media URLs.
+  - type: input
+    id: version
+    attributes:
+      label: Script version
+      placeholder: "2.1.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: browser
+    attributes:
+      label: Browser
+      options:
+        - Firefox
+        - Chrome
+        - Edge
+        - Brave
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: manager
+    attributes:
+      label: Userscript manager and version
+      placeholder: "Tampermonkey 5.x"
+    validations:
+      required: true
+  - type: dropdown
+    id: page
+    attributes:
+      label: Instagram page type
+      options:
+        - Profile
+        - Tagged feed
+        - Home feed
+        - Individual post
+        - Reel
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Exact reproduction steps
+      description: Include the route changes and buttons used.
+      placeholder: "1. Open…\n2. Click…\n3. Observe…"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or safe debug information
+      description: Redact personal information. Never paste cookies, tokens, or private URLs.
