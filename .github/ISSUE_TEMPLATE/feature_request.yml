@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a focused improvement to the gallery or viewer
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Desired behavior
+      description: Describe the user interaction and expected result precisely.
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Existing behavior that must not change
+      description: List loader, layout, viewer, download, or navigation behavior that should be preserved.
+  - type: textarea
+    id: examples
+    attributes:
+      label: Examples, screenshots, or comparable tools
