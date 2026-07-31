@@ -1,0 +1,42 @@
+name: Bootstrap release files
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.bootstrap/**'
+      - '.github/workflows/bootstrap.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Reconstruct release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .bootstrap/part-*.b64 > /tmp/payload.b64
+          base64 --decode /tmp/payload.b64 > /tmp/payload.tar.gz
+          echo '7a507fffafcc248ae9fcfd8726d4ac7ad217a0e48c5229a0019f28639ea7a824  /tmp/payload.tar.gz' | sha256sum --check --strict
+          tar -xzf /tmp/payload.tar.gz
+          echo '6da17c6790402bdee69b97127888e4b08f7054023baad5fa904c82af4dae3f7b  instagram-full-size-gallery-downloader.user.js' | sha256sum --check --strict
+          echo '5132c7f0475b02c8107a2e0f0363e70423c62d2664ab927e76193226e5e05905  LICENSE' | sha256sum --check --strict
+          node --check instagram-full-size-gallery-downloader.user.js
+          node scripts/validate-userscript.mjs
+
+      - name: Commit generated release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .bootstrap .github/workflows/bootstrap.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'release: add userscript v2.1.4 and AGPL license'
+          git push
