@@ -1,0 +1,97 @@
+name: Apply v2.1.5 viewer controls patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-v2.1.5.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Apply focused viewer-controls patch
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+
+          const scriptPath = 'instagram-full-size-gallery-downloader.user.js';
+          let source = readFileSync(scriptPath, 'utf8');
+
+          function replaceOnce(from, to, label) {
+            const first = source.indexOf(from);
+            if (first === -1) throw new Error(`Missing patch anchor: ${label}`);
+            if (source.indexOf(from, first + from.length) !== -1) throw new Error(`Patch anchor is not unique: ${label}`);
+            source = source.slice(0, first) + to + source.slice(first + from.length);
+          }
+
+          replaceOnce('// @version      2.1.4', '// @version      2.1.5', 'version');
+
+          replaceOnce(
+            `        <section class="lightbox hidden">\n          <button class="viewer-close" data-action="viewer-close">×</button>\n          <button class="viewer-nav prev" data-action="prev">‹</button>`,
+            `        <section class="lightbox hidden">\n          <button class="viewer-controls-toggle" data-action="toggle-controls" aria-pressed="false">Hide controls</button>\n          <button class="viewer-close" data-action="viewer-close">×</button>\n          <button class="viewer-nav prev" data-action="prev">‹</button>`,
+            'viewer toggle markup',
+          );
+
+          replaceOnce(
+            `      if (action === 'viewer-close') closeViewer();\n      if (action === 'prev') moveViewer(-1);`,
+            `      if (action === 'viewer-close') closeViewer();\n      if (action === 'toggle-controls') {\n        const hidden = lightbox.classList.toggle('controls-hidden');\n        const toggle = $('.viewer-controls-toggle');\n        toggle.textContent = hidden ? 'Show controls' : 'Hide controls';\n        toggle.setAttribute('aria-pressed', String(hidden));\n      }\n      if (action === 'prev') moveViewer(-1);`,
+            'viewer toggle action',
+          );
+
+          replaceOnce(
+            `.lightbox{position:fixed;inset:0;z-index:20;display:grid;grid-template-rows:minmax(0,1fr) auto;background:#000e}.viewer-viewport`,
+            `.lightbox{position:fixed;inset:0;z-index:20;display:grid;grid-template-rows:minmax(0,1fr) auto;background:#000e}.lightbox.controls-hidden{grid-template-rows:minmax(0,1fr)}.lightbox.controls-hidden .viewer-footer{display:none}.viewer-viewport`,
+            'footer collapse CSS',
+          );
+
+          replaceOnce(
+            `.viewer-actions button{color:#fff;background:#ffffff18;border-color:#ffffff30}.viewer-close,.viewer-nav{position:fixed;z-index:22;color:#fff;background:#ffffff20;border-color:#ffffff38}.viewer-close{top:18px;right:18px;width:44px;height:44px;padding:0;border-radius:50%;font-size:26px}`,
+            `.viewer-actions button{color:#fff;background:#ffffff18;border-color:#ffffff30}.viewer-controls-toggle,.viewer-close,.viewer-nav{position:fixed;z-index:22;color:#fff;background:#ffffff20;border-color:#ffffff38}.viewer-controls-toggle{top:18px;right:74px;padding:9px 12px;border-radius:999px;font-size:12px;font-weight:700}.viewer-close{top:18px;right:18px;width:44px;height:44px;padding:0;border-radius:50%;font-size:26px}`,
+            'viewer toggle CSS',
+          );
+
+          writeFileSync(scriptPath, source);
+
+          const validatorPath = 'scripts/validate-userscript.mjs';
+          let validator = readFileSync(validatorPath, 'utf8');
+          validator = validator.replace("'// @version      2.1.4',", "'// @version      2.1.5',");
+          validator = validator.replace(
+            "  '// @connect      i.instagram.com',\n];",
+            "  '// @connect      i.instagram.com',\n  'data-action=\"toggle-controls\"',\n  'controls-hidden',\n];",
+          );
+          if (!validator.includes("'// @version      2.1.5',") || !validator.includes("'controls-hidden',")) {
+            throw new Error('Validator patch did not apply cleanly');
+          }
+          writeFileSync(validatorPath, validator);
+          NODE
+
+      - name: Verify patched userscript
+        run: |
+          node --check instagram-full-size-gallery-downloader.user.js
+          node scripts/validate-userscript.mjs
+          grep -F '// @version      2.1.5' instagram-full-size-gallery-downloader.user.js
+          grep -F 'data-action="toggle-controls"' instagram-full-size-gallery-downloader.user.js
+          grep -F '.lightbox.controls-hidden .viewer-footer{display:none}' instagram-full-size-gallery-downloader.user.js
+
+      - name: Commit focused patch and remove one-time workflow
+        shell: bash
+        run: |
+          rm .github/workflows/one-time-v2.1.5.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add instagram-full-size-gallery-downloader.user.js scripts/validate-userscript.mjs .github/workflows/one-time-v2.1.5.yml
+          git commit -m 'Add hideable viewer controls'
+          git push
