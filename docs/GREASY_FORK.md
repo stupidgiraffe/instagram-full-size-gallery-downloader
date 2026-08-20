@@ -1,4 +1,8 @@
-# Greasy Fork publishing and update copy
+# Greasy Fork publishing and sync setup
+
+## Live listing
+
+https://greasyfork.org/en/scripts/592249-instagram-full-size-gallery-downloader
 
 ## Public title
 
@@ -8,13 +12,29 @@
 
 Rebuilds Instagram into an uncropped, full-size photo and video gallery with smooth zoom, continuous browsing, load-all, and direct downloads.
 
-## Detailed description
+## Code source syncing
 
-Instagram’s native grid crops portrait images and makes large photo collections difficult to browse.
+Use the raw GitHub userscript as the Greasy Fork code-sync source:
 
-**Instagram Full-Size Gallery & Downloader** rebuilds supported Instagram pages into a continuous, uncropped image and video gallery. The gallery is the main feature: profiles become a dedicated media wall, and clicking any item opens a full-size viewer with smooth zoom, drag-to-pan, continuous navigation, hideable controls, and direct downloads.
+`https://raw.githubusercontent.com/stupidgiraffe/instagram-full-size-gallery-downloader/main/instagram-full-size-gallery-downloader.user.js`
 
-### Highlights
+Automatic syncing is fine once a release has been tested. Every public runtime change must increment `@version` before it is pushed.
+
+## Additional info syncing
+
+Greasy Fork can sync the public **Additional info** section independently from the userscript code.
+
+For **Default additional info (language matches @name)** use:
+
+`https://raw.githubusercontent.com/stupidgiraffe/instagram-full-size-gallery-downloader/main/docs/GREASY_FORK_DESCRIPTION.md`
+
+That file is intentionally written only for the public Greasy Fork listing. Do not use the repository README or the `.user.js` file as the Additional info source.
+
+Future listing-copy changes should be made in `docs/GREASY_FORK_DESCRIPTION.md` so GitHub remains the source of truth.
+
+## Detailed description source
+
+The synced description currently covers:
 
 - Complete uncropped portrait and landscape images
 - Full-size image and video gallery
@@ -29,30 +49,20 @@ Instagram’s native grid crops portrait images and makes large photo collection
 - Highest-quality available image downloads
 - Direct video downloads
 - Image/video filters and saved settings
-- No analytics, tracking, advertisements, or remote code
+- Privacy, permissions, source, support, credits, and disclaimer information
 
-### Controls
+## Force / immediate update workflow
 
-- Click image: zoom in or return to fitted view
-- Mouse wheel / two-finger scroll: fine zoom
-- Drag: pan while zoomed
-- Arrow keys: previous or next
-- **Hide controls / Show controls**: collapse or restore the bottom viewer bar
-- `F`: reset view
-- `D`: download current image/video
-- `Esc`: close viewer
+When you do not want to wait for the periodic automatic check:
 
-### Source and support
+1. Push the verified release to GitHub with a higher `@version`.
+2. Open the Greasy Fork script **Admin** page.
+3. Trigger the source sync/update control shown in the Source Syncing section if available.
+4. Confirm the Greasy Fork **Code** tab now shows the new `@version`.
+5. Confirm the Additional info section reflects the synced Markdown when that source changed too.
+6. Reinstall/update the Greasy Fork copy with development copies disabled and run the relevant tests.
 
-GitHub source and issue tracker:
-
-https://github.com/stupidgiraffe/instagram-full-size-gallery-downloader
-
-Voluntary support:
-
-https://buymeacoffee.com/stupidgiraffe
-
-This project is not affiliated with Instagram or Meta.
+A Greasy Fork webhook can also be configured so a GitHub push triggers an update instead of waiting for periodic polling.
 
 ## Update checklist
 
@@ -67,11 +77,3 @@ For every Greasy Fork update:
 7. Disable every development copy and install the Greasy Fork copy fresh.
 8. Re-test portrait/landscape viewing, click zoom/reset, hide/show controls, pagination, image download, and video download.
 9. Keep `@namespace` stable and do not add custom `@updateURL` or `@downloadURL` metadata.
-
-## GitHub sync recommendation
-
-If Greasy Fork source sync is enabled, point it at the raw main-branch userscript:
-
-`https://raw.githubusercontent.com/stupidgiraffe/instagram-full-size-gallery-downloader/main/instagram-full-size-gallery-downloader.user.js`
-
-Manual sync is safer while the script is changing quickly because it prevents an untested GitHub commit from becoming an automatic public release.
