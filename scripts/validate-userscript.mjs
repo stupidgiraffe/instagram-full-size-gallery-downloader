@@ -9,11 +9,13 @@ const requiredMetadata = [
   '// @name         Instagram Full-Size Gallery & Downloader',
   '// @namespace    https://github.com/stupidgiraffe/instagram-full-size-gallery-downloader',
   '// @license      AGPL-3.0-or-later',
-  '// @version      2.1.4',
+  '// @version      2.1.5',
   '// @contributionURL https://buymeacoffee.com/stupidgiraffe',
   '// @grant        GM_download',
   '// @grant        GM_xmlhttpRequest',
   '// @connect      i.instagram.com',
+  'data-action="toggle-controls"',
+  'controls-hidden',
 ];
 
 const missing = requiredMetadata.filter((line) => !source.includes(line));

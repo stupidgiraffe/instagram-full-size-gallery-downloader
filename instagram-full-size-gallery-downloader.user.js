@@ -13,7 +13,7 @@
 // @compatible   brave
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
-// @version      2.1.4
+// @version      2.1.5
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -758,6 +758,7 @@
           <button data-action="reset">Reset settings</button>
         </aside>
         <section class="lightbox hidden">
+          <button class="viewer-controls-toggle" data-action="toggle-controls" aria-pressed="false">Hide controls</button>
           <button class="viewer-close" data-action="viewer-close">×</button>
           <button class="viewer-nav prev" data-action="prev">‹</button>
           <div class="viewer-viewport">
@@ -1130,6 +1131,12 @@
         toast('Settings reset.', 'success');
       }
       if (action === 'viewer-close') closeViewer();
+      if (action === 'toggle-controls') {
+        const hidden = lightbox.classList.toggle('controls-hidden');
+        const toggle = $('.viewer-controls-toggle');
+        toggle.textContent = hidden ? 'Show controls' : 'Hide controls';
+        toggle.setAttribute('aria-pressed', String(hidden));
+      }
       if (action === 'prev') moveViewer(-1);
       if (action === 'next') moveViewer(1);
       if (action === 'download' && entry) downloadEntry(entry);
@@ -1281,8 +1288,8 @@
       .app[data-layout=classic] .gallery{text-align:center}.app[data-layout=classic] .media-card{display:inline-block;vertical-align:top;max-width:49vw;margin:9px}.app[data-layout=classic] .media-frame img,.app[data-layout=classic] .media-frame video{max-width:49vw;max-height:80vh}
       .app[data-layout=contact] .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}.app[data-layout=contact] .media-frame{aspect-ratio:1;overflow:hidden}.app[data-layout=contact] .media-frame img,.app[data-layout=contact] .media-frame video{width:100%;height:100%;object-fit:contain}.app[data-layout=contact][data-thumbnails=crop] .media-frame img,.app[data-layout=contact][data-thumbnails=crop] .media-frame video{object-fit:cover}.app[data-layout=contact] .card-meta{display:none}
       .panel{position:fixed;top:82px;right:18px;z-index:10;display:grid;gap:12px;width:min(390px,calc(100vw - 36px));max-height:calc(100vh - 110px);overflow:auto;padding:14px;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:20px;box-shadow:0 18px 60px #0006}.panel-head{display:flex;justify-content:space-between;align-items:center}.panel label{display:grid;gap:6px;color:var(--muted);font-size:13px}.panel .check{display:flex;align-items:center}.panel small{opacity:.8}
-      .lightbox{position:fixed;inset:0;z-index:20;display:grid;grid-template-rows:minmax(0,1fr) auto;background:#000e}.viewer-viewport{position:relative;display:grid;place-items:center;min-width:0;min-height:0;overflow:hidden;padding:24px 74px;touch-action:none}.viewer-media{display:flex;align-items:center;justify-content:center;width:min(72vw,1100px);height:min(68vh,680px);max-width:100%;max-height:100%;min-width:0;min-height:0}.app[data-viewer-size=compact] .viewer-media{width:min(58vw,840px);height:min(60vh,560px)}.app[data-viewer-size=large] .viewer-media{width:min(86vw,1400px);height:min(78vh,820px)}.viewer-media img,.viewer-media video{display:block;width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain;transform-origin:center center;will-change:transform;user-select:none;-webkit-user-drag:none}.viewer-media img{cursor:zoom-in}.viewer-viewport.zoom-out-ready img{cursor:zoom-out}.viewer-viewport.dragging img{cursor:grabbing}
-      .viewer-footer{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:86px;padding:11px 18px;color:#fff;background:#090b12;border-top:1px solid #ffffff25}.viewer-meta{display:grid;gap:3px;min-width:0}.viewer-kicker,.viewer-status{color:#ffffff9e;font-size:12px}.viewer-title{overflow:hidden;color:#ffffffdb;text-overflow:ellipsis;white-space:nowrap}.viewer-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}.viewer-actions button{color:#fff;background:#ffffff18;border-color:#ffffff30}.viewer-close,.viewer-nav{position:fixed;z-index:22;color:#fff;background:#ffffff20;border-color:#ffffff38}.viewer-close{top:18px;right:18px;width:44px;height:44px;padding:0;border-radius:50%;font-size:26px}.viewer-nav{top:45%;width:54px;height:78px;padding:0;font-size:52px;line-height:1;transform:translateY(-50%)}.viewer-nav.prev{left:14px}.viewer-nav.next{right:14px}
+      .lightbox{position:fixed;inset:0;z-index:20;display:grid;grid-template-rows:minmax(0,1fr) auto;background:#000e}.lightbox.controls-hidden{grid-template-rows:minmax(0,1fr)}.lightbox.controls-hidden .viewer-footer{display:none}.viewer-viewport{position:relative;display:grid;place-items:center;min-width:0;min-height:0;overflow:hidden;padding:24px 74px;touch-action:none}.viewer-media{display:flex;align-items:center;justify-content:center;width:min(72vw,1100px);height:min(68vh,680px);max-width:100%;max-height:100%;min-width:0;min-height:0}.app[data-viewer-size=compact] .viewer-media{width:min(58vw,840px);height:min(60vh,560px)}.app[data-viewer-size=large] .viewer-media{width:min(86vw,1400px);height:min(78vh,820px)}.viewer-media img,.viewer-media video{display:block;width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain;transform-origin:center center;will-change:transform;user-select:none;-webkit-user-drag:none}.viewer-media img{cursor:zoom-in}.viewer-viewport.zoom-out-ready img{cursor:zoom-out}.viewer-viewport.dragging img{cursor:grabbing}
+      .viewer-footer{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:86px;padding:11px 18px;color:#fff;background:#090b12;border-top:1px solid #ffffff25}.viewer-meta{display:grid;gap:3px;min-width:0}.viewer-kicker,.viewer-status{color:#ffffff9e;font-size:12px}.viewer-title{overflow:hidden;color:#ffffffdb;text-overflow:ellipsis;white-space:nowrap}.viewer-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}.viewer-actions button{color:#fff;background:#ffffff18;border-color:#ffffff30}.viewer-controls-toggle,.viewer-close,.viewer-nav{position:fixed;z-index:22;color:#fff;background:#ffffff20;border-color:#ffffff38}.viewer-controls-toggle{top:18px;right:74px;padding:9px 12px;border-radius:999px;font-size:12px;font-weight:700}.viewer-close{top:18px;right:18px;width:44px;height:44px;padding:0;border-radius:50%;font-size:26px}.viewer-nav{top:45%;width:54px;height:78px;padding:0;font-size:52px;line-height:1;transform:translateY(-50%)}.viewer-nav.prev{left:14px}.viewer-nav.next{right:14px}
       .toasts{position:fixed;right:20px;bottom:105px;z-index:30;display:grid;gap:8px;width:min(380px,calc(100vw - 40px));pointer-events:none}.toast{padding:11px 13px;color:#fff;background:#202536;border:1px solid #ffffff2c;border-radius:12px;box-shadow:0 12px 34px #0008;opacity:0;transform:translateY(7px);transition:.18s}.toast.show{opacity:1;transform:none}.toast.success{background:#135c3d}.toast.error{background:#7a2532}.toast.warning{background:#755315}
       @media(max-width:760px){.toolbar{align-items:flex-start;flex-direction:column}.controls{justify-content:flex-start}.statusbar{display:grid}.app[data-layout=classic] .media-card,.app[data-layout=classic] .media-frame img,.app[data-layout=classic] .media-frame video{max-width:96vw}.viewer-viewport{padding:12px}.viewer-media,.app[data-viewer-size=compact] .viewer-media,.app[data-viewer-size=large] .viewer-media{width:min(92vw,900px);height:min(68vh,680px)}.viewer-nav{display:none}.viewer-footer{align-items:flex-start;flex-direction:column}.viewer-actions{justify-content:flex-start}}
     `;
