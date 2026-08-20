@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.5] - 2026-08-21
+
+### Added
+
+- Added a persistent **Hide controls / Show controls** button in the full-size viewer.
+- Hiding the controls completely collapses the bottom viewer footer so it cannot obstruct or reduce the usable media-viewing area.
+- Kept the toggle accessible at the top of the viewer so the controls can always be restored.
+
+### Changed
+
+- Strengthened repository documentation around installation, privacy, permissions, troubleshooting, release discipline, and the gallery-first design.
+- Updated userscript validation so CI verifies the v2.1.5 metadata and the hideable-controls feature.
+
 ## [2.1.4] - 2026-07-31
 
 ### Changed
