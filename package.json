@@ -1,0 +1,8 @@
+{
+  "name": "instagram-full-size-gallery-downloader",
+  "private": true,
+  "scripts": {
+    "test": "node --check instagram-full-size-gallery-downloader.user.js && node scripts/validate-userscript.mjs && node scripts/regression.cjs"
+  },
+  "devDependencies": { "jsdom": "26.1.0" }
+}

@@ -25,3 +25,9 @@ jobs:
 
       - name: Validate userscript metadata and policy
         run: node scripts/validate-userscript.mjs
+
+      - name: Install test dependencies
+        run: npm ci
+
+      - name: Run behavioral regressions
+        run: node scripts/regression.cjs
