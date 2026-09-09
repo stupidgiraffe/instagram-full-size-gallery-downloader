@@ -120,7 +120,7 @@ Greasy Fork is recommended for normal users because updates are handled through 
 
 - Profiles
 - Tagged feeds
-- Home feed, when Instagram's logged-in web endpoint permits it
+- Home feed, using media loaded by the logged-in Instagram page
 - Individual post and reel pages through visible-media harvesting
 
 ### Currently not supported
@@ -146,9 +146,9 @@ The distributed userscript is readable source code and has no remote `@require` 
 | `GM_registerMenuCommand` | Provide userscript-manager shortcuts |
 | `GM_setClipboard` | Copy post/media URLs |
 | `GM_download` | Download images and videos directly |
-| `GM_xmlhttpRequest` | Fallback request path when normal browser `fetch()` is blocked by Instagram/CORS behavior |
-| `unsafeWindow` | Read Instagram page/session state required by the loader |
-| `@connect i.instagram.com` | Instagram web API requests |
+| `GM_xmlhttpRequest` | Retrieve media blobs when manager downloads fail; fallback transport for a bounded expired-media refresh |
+| `unsafeWindow` | Observe Instagram's native media responses and scroll the page to load more posts |
+| `@connect instagram.com` / `www.instagram.com` / `i.instagram.com` | Refresh an expired media URL once when fresh page data is unavailable |
 | `@connect *.cdninstagram.com` / `*.fbcdn.net` | Media retrieval/download fallbacks |
 
 There is **no analytics, ad network, external telemetry, remote configuration, or user tracking** in the script.
@@ -166,24 +166,27 @@ Before filing an issue:
 Common symptoms:
 
 - **Media from the previous profile appears:** reload and confirm only one script copy is enabled. The current code also rejects stale responses after route changes.
-- **A download opens instead of saving:** the script may be using the browser-open fallback after a userscript-manager download failure.
-- **NetworkError:** Instagram may have rejected the normal fetch path; the script automatically attempts `GM_xmlhttpRequest` as a fallback.
-- **No more media loads:** Instagram may have returned no next cursor or repeated a cursor; the script stops instead of looping the previous page.
+- **A download fails:** the script tries available media URLs, a blob download, and one expired-media refresh. It reports failure if these fail; opening a remote URL does not count as a successful download.
+- **HTTP 404 during gallery loading:** v2.1.6 reads Instagram's own page data and native responses, without requesting the old profile/feed REST routes. Use **Copy diagnostics** to include the script version and failed endpoint/status in a report.
+- **Waiting for more posts:** the gallery has paused because Instagram did not return more media. Close the gallery, check that Instagram itself loads the posts, then reopen or press **Load more**. A timeout does not count as the end of the feed.
+- **Only previews appear:** visible-page thumbnails are available before full media data. Fresh native responses upgrade these items when the gallery consumes the next batch.
 
 Use the [bug-report template](https://github.com/stupidgiraffe/instagram-full-size-gallery-downloader/issues/new/choose) for reproducible regressions.
 
 ## Development
 
-There is no build step and no package installation. The distributed `.user.js` file is also the source.
+There is no runtime build step or dependency. The distributed `.user.js` file is also the source. Automated behavioral tests use jsdom as a development dependency.
 
 Local verification:
 
 ```bash
-node --check instagram-full-size-gallery-downloader.user.js
-node scripts/validate-userscript.mjs
+npm ci
+npm test
 ```
 
 Before changing loader, pagination, media sizing, or viewer geometry, map the complete behavior on both sides of the change and run the manual checklist in [`docs/TESTING.md`](docs/TESTING.md).
+
+The automated tests use controlled page and network fixtures. They do not replace checks in a logged-in Instagram session or verification of the Greasy Fork-installed copy.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CHANGELOG.md`](CHANGELOG.md), and [`NOTICE.md`](NOTICE.md) for project history and contribution expectations.
 

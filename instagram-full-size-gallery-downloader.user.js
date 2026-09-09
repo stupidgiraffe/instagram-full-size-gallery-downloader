@@ -13,7 +13,7 @@
 // @compatible   brave
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
-// @version      2.1.5
+// @version      2.1.6
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -21,6 +21,8 @@
 // @grant        GM_download
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
+// @connect      instagram.com
+// @connect      www.instagram.com
 // @connect      i.instagram.com
 // @connect      *.cdninstagram.com
 // @connect      *.fbcdn.net
@@ -44,7 +46,7 @@
   const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const doc = document;
   const APP_ID = '936619743392459';
-  const ASBD_ID = '129477';
+  const ASBD_ID = '198387';
   const STORAGE_KEY = 'igFullSizeGallery.v2.settings';
 
   const DEFAULTS = Object.freeze({
@@ -59,6 +61,7 @@
     videoVolume: 0.02,
     launcherPosition: 'bottom-right',
     viewerSize: 'compact', // compact | comfortable | large
+    hideViewerControls: false,
   });
 
   const state = {
@@ -81,6 +84,11 @@
     controller: null,
     observer: null,
     lightboxIndex: -1,
+    starting: false,
+    autoPaused: false,
+    nativeConsumed: new Map(),
+    nativeStep: 0,
+    mediaById: new Map(),
     stats: {
       images: 0,
       videos: 0,
@@ -94,19 +102,34 @@
   let ui = null;
 
   function loadSettings() {
-    try {
-      const raw = typeof GM_getValue === 'function' ? GM_getValue(STORAGE_KEY, '') : localStorage.getItem(STORAGE_KEY);
-      return raw ? { ...DEFAULTS, ...JSON.parse(raw) } : { ...DEFAULTS };
-    } catch (_) {
-      return { ...DEFAULTS };
+    const candidates = [];
+    function accept(raw) {
+      try {
+        const value = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (value && typeof value === 'object' && !Array.isArray(value) && !value.then) candidates.push(value);
+      } catch (_) {}
     }
+    try { if (typeof GM_getValue === 'function') accept(GM_getValue(STORAGE_KEY, '')); } catch (_) {}
+    try { accept(localStorage.getItem(STORAGE_KEY)); } catch (_) {}
+    candidates.sort((a, b) => (Number(b._savedAt) || 0) - (Number(a._savedAt) || 0));
+    const stored = candidates[0] || {};
+    if (typeof stored.hideViewerControls !== 'boolean') {
+      if (typeof stored.hideGalleryControls === 'boolean') stored.hideViewerControls = stored.hideGalleryControls;
+      else if (typeof stored.hideControls === 'boolean') stored.hideViewerControls = stored.hideControls;
+      else if (typeof stored.controlsHidden === 'boolean') stored.hideViewerControls = stored.controlsHidden;
+    }
+    return { ...DEFAULTS, ...stored };
   }
 
   function saveSettings() {
+    state.settings._savedAt = Math.max(Date.now(), (Number(state.settings._savedAt) || 0) + 1);
     const raw = JSON.stringify(state.settings);
+    try { localStorage.setItem(STORAGE_KEY, raw); } catch (_) {}
     try {
-      if (typeof GM_setValue === 'function') GM_setValue(STORAGE_KEY, raw);
-      else localStorage.setItem(STORAGE_KEY, raw);
+      if (typeof GM_setValue === 'function') {
+        const result = GM_setValue(STORAGE_KEY, raw);
+        if (result?.catch) result.catch(() => {});
+      }
     } catch (_) {}
   }
 
@@ -140,6 +163,7 @@
         reject(new Error('GM_xmlhttpRequest unavailable'));
         return;
       }
+      if (options.signal?.aborted) { reject(new DOMException('Aborted', 'AbortError')); return; }
       const request = GM_xmlhttpRequest({
         method: options.method || 'GET',
         url,
@@ -149,7 +173,9 @@
         timeout: 30000,
         onload: response => {
           if (response.status < 200 || response.status >= 300) {
-            reject(new Error(`HTTP ${response.status}`));
+            const error = new Error(`HTTP ${response.status}`);
+            error.status = response.status;
+            reject(error);
             return;
           }
           try {
@@ -169,17 +195,22 @@
 
   async function requestJson(url, options = {}) {
     try {
-      const response = await (win.fetch || fetch)(url, {
+      const response = await (originalFetch || win.fetch.bind(win))(url, {
         method: options.method || 'GET',
         headers: options.headers || {},
         body: options.body,
         credentials: 'include',
         signal: options.signal,
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+      if (!response.ok) {
+        const error = new Error(`HTTP ${response.status} ${response.statusText}`);
+        error.status = response.status;
+        throw error;
+      }
       return await response.json();
     } catch (error) {
       if (error?.name === 'AbortError') throw error;
+      if (error?.status) throw error;
       return gmJson(url, options);
     }
   }
@@ -201,46 +232,300 @@
     };
   }
 
-  async function resolveUserId(username, signal) {
-    if (!username) return '';
+  const VERSION = '2.1.6';
+  const native = {
+    key: '', items: new Map(), scripts: new WeakSet(), sequence: 0,
+    pageInfo: null, requests: 0, responses: 0, errors: [], hooks: [],
+  };
+  const originalFetch = typeof win.fetch === 'function' ? win.fetch.bind(win) : null;
+  const refreshRequests = new Map();
+  const mediaBindings = new WeakMap();
 
-    try {
-      const url = `https://i.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
-      const json = await requestJson(url, { headers: headers(), signal });
-      const id = json?.data?.user?.id || json?.user?.id;
-      if (id) return String(id);
-    } catch (error) {
-      if (error?.name === 'AbortError') throw error;
+  function routeCache(route = detectRoute()) {
+    if (native.key !== route.key) {
+      native.key = route.key;
+      native.items.clear();
+      native.scripts = new WeakSet();
+      native.pageInfo = null;
+      native.sequence = 0;
     }
+    return native;
+  }
 
-    const html = doc.documentElement?.innerHTML || '';
-    for (const pattern of [
-      /"profile_id"\s*:\s*"?(\d+)"?/,
-      /profilePage_(\d+)/,
-      /"user_id"\s*:\s*"?(\d+)"?/,
-    ]) {
-      const match = html.match(pattern)?.[1];
-      if (match) return match;
+  function mediaMatchesRoute(media, route) {
+    if (!media || typeof media !== 'object') return false;
+    const code = media.code || media.shortcode;
+    const owner = media.user || media.owner;
+    if (route.mode === 'profile') return String(owner?.username || '').toLowerCase() === route.username.toLowerCase();
+    if (route.mode === 'post') return code === location.pathname.match(/^\/(?:p|reel|tv)\/([^/?#]+)/)?.[1];
+    return route.mode === 'home' || route.mode === 'tagged';
+  }
+
+  function isMediaNode(value) {
+    return Boolean(value && (value.code || value.shortcode || value.pk || value.id) && (
+      value.image_versions2 || value.display_url || value.video_versions || value.video_url
+      || value.carousel_media || value.edge_sidecar_to_children || value.carousel_media_items
+    ));
+  }
+
+  function mediaSignature(media) {
+    return JSON.stringify(media);
+  }
+
+  function cacheMedia(media, route, source) {
+    if (detectRoute().key !== route.key) return;
+    const cache = routeCache(route);
+    const key = String(media.code || media.shortcode || media.pk || media.id || '');
+    if (!key) return;
+    const previous = cache.items.get(key);
+    if (previous && !previous.media.__preview && media.__preview) return;
+    const signature = mediaSignature(media);
+    if (previous?.signature === signature) return;
+    cache.items.set(key, { media, signature, source });
+    cache.sequence += 1;
+    if (cache.items.size > 600) cache.items.delete(cache.items.keys().next().value);
+  }
+
+  function parsePayload(text) {
+    if (typeof text !== 'string' || text.length > 12_000_000) return [];
+    const clean = text.trim().replace(/^for\s*\(;;\)\s*;\s*/, '').replace(/^\)\]\}',?\s*/, '');
+    try { return [JSON.parse(clean)]; } catch (_) {}
+    const values = [];
+    for (const line of clean.split('\n')) {
+      try { values.push(JSON.parse(line)); } catch (_) {}
     }
+    return values;
+  }
 
+  function ingestPayload(value, route, source = 'network') {
+    if (detectRoute().key !== route.key) return;
+    routeCache(route);
+    const visited = new WeakSet();
+    let remaining = 24000;
+    function walk(node, path = '', depth = 0, inFeed = false) {
+      if (!node || depth > 45 || --remaining < 0) return;
+      if (typeof node === 'string') {
+        if (node.length < 4_000_000 && /^[\[{]/.test(node.trim()) && /image_versions2|display_url|carousel_media/.test(node)) {
+          for (const parsed of parsePayload(node)) walk(parsed, path, depth + 1, inFeed);
+        }
+        return;
+      }
+      if (typeof node !== 'object' || visited.has(node)) return;
+      visited.add(node);
+      const feed = inFeed || /timeline|usertags|tagged|edge_owner_to_timeline_media/.test(path);
+      const eligible = items => source === 'network' || items.some(item => mediaMatchesRoute(item.node || item.media || item, route));
+      if (node.page_info && Array.isArray(node.edges) && feed && eligible(node.edges)) {
+        const info = node.page_info;
+        if (typeof info.has_next_page === 'boolean' && (source === 'network' || native.pageInfo === null)) native.pageInfo = { more: info.has_next_page, cursor: info.end_cursor || null };
+      }
+      if (typeof node.more_available === 'boolean' && (Array.isArray(node.items) || Array.isArray(node.feed_items)) && eligible(node.items || node.feed_items)) {
+        if (source === 'network' || native.pageInfo === null) native.pageInfo = { more: node.more_available, cursor: node.next_max_id || null };
+      }
+      if (isMediaNode(node)) {
+        if (mediaMatchesRoute(node, route) && (route.mode !== 'tagged' || feed || source === 'network')) cacheMedia(node, route, source);
+        return;
+      }
+      for (const [key, child] of Object.entries(node)) {
+        if (/suggested|recommend|chaining|reels_tray/.test(key)) continue;
+        walk(child, `${path}.${key}`, depth + 1, feed);
+      }
+    }
+    walk(value);
+  }
+
+  function scanPageData(route = detectRoute()) {
+    routeCache(route);
+    for (const script of doc.querySelectorAll('script[type="application/json"], script[data-sjs]')) {
+      if (native.scripts.has(script) || !script.textContent) continue;
+      native.scripts.add(script);
+      for (const value of parsePayload(script.textContent)) ingestPayload(value, route, 'page data');
+    }
+  }
+
+  function normalizeMediaUrl(value) {
+    if (typeof value !== 'string') return '';
+    const decoded = value.replace(/&amp;/g, '&').replace(/\\u0026/gi, '&').replace(/\\\//g, '/');
     try {
-      const id = await new Promise(resolve => {
-        const open = indexedDB.open('redux');
-        open.onerror = () => resolve('');
-        open.onsuccess = () => {
-          try {
-            const request = open.result.transaction('paths', 'readonly').objectStore('paths').get('users.usernameToId');
-            request.onerror = () => resolve('');
-            request.onsuccess = () => resolve(String(request.result?.[username] || ''));
-          } catch (_) {
-            resolve('');
-          }
-        };
+      const url = new URL(decoded, location.href);
+      return ['http:', 'https:', 'blob:'].includes(url.protocol) ? url.href : '';
+    } catch (_) { return ''; }
+  }
+
+  function scanVisibleMedia(route = detectRoute()) {
+    if (route.key !== detectRoute().key) return;
+    routeCache(route);
+    const groups = new Map();
+    const selectors = route.mode === 'post' ? 'article img, article video, main img, main video' : 'main a[href] img, main a[href] video, article img, article video';
+    for (const element of doc.querySelectorAll(selectors)) {
+      if (element.closest('#ig-full-size-gallery-host')) continue;
+      const article = element.closest('article');
+      let anchor = element.closest('a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]');
+      if (!anchor && article) anchor = article.querySelector('a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]');
+      const code = (anchor?.href || (route.mode === 'post' ? location.href : '')).match(/\/(?:p|reel|tv)\/([^/?#]+)/)?.[1];
+      if (!code || /profile (picture|photo)|avatar/i.test(element.alt || '')) continue;
+      const width = element.naturalWidth || element.videoWidth || element.width || 0;
+      const height = element.naturalHeight || element.videoHeight || element.height || 0;
+      if (element.tagName === 'IMG' && width > 0 && width < 100 && height < 100) continue;
+      const current = normalizeMediaUrl(element.currentSrc || element.src);
+      if (!current) continue;
+      const candidates = [];
+      if (element.tagName === 'IMG') {
+        for (const piece of (element.srcset || '').split(/,\s*(?=https?:)/)) {
+          const match = piece.trim().match(/^(\S+)\s+(\d+)w$/);
+          if (match) candidates.push({ url: normalizeMediaUrl(match[1]), width: Number(match[2]), height: width && height ? Math.round(Number(match[2]) * height / width) : 0 });
+        }
+        candidates.push({ url: current, width, height });
+      }
+      let parent = groups.get(code);
+      if (!parent) {
+        parent = { code, __preview: true, user: { username: route.username }, carousel_media: [] };
+        groups.set(code, parent);
+      }
+      if (parent.carousel_media.some(child => (child.video_url || child.image_versions2?.candidates?.at(-1)?.url) === current)) continue;
+      parent.carousel_media.push(element.tagName === 'VIDEO'
+        ? { is_video: true, video_url: current, image_versions2: { candidates: element.poster ? [{ url: normalizeMediaUrl(element.poster) }] : [] } }
+        : { image_versions2: { candidates } });
+    }
+    for (const media of groups.values()) cacheMedia(media, route, 'visible page');
+  }
+
+  function observedEndpoint(input) {
+    try {
+      const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+      if (!['www.instagram.com', 'instagram.com', 'i.instagram.com'].includes(url.hostname)) return null;
+      if (!/^\/(?:graphql\/query\/?|api\/graphql\/?|api\/v1\/(?:feed\/(?:user\/|timeline\/)|usertags\/|media\/[^/]+\/info\/))/.test(url.pathname)) return null;
+      return url;
+    } catch (_) { return null; }
+  }
+
+  function recordNativeFailure(url, status) {
+    native.errors.push({ path: url.pathname.replace(/\/\d+(?:_\d+)?\//g, '/:id/'), status: Number(status) || 0 });
+    if (native.errors.length > 8) native.errors.shift();
+  }
+
+  function installResponseCapture() {
+    const expose = fn => typeof exportFunction === 'function' ? exportFunction(fn, win, { allowCrossOriginArguments: true }) : fn;
+    if (originalFetch) {
+      try {
+        win.fetch = expose(function (...args) {
+          const url = observedEndpoint(args[0]);
+          const route = detectRoute();
+          if (url) native.requests += 1;
+          return originalFetch(...args).then(response => {
+            if (url && detectRoute().key === route.key) {
+              if (response.ok) {
+                try {
+                  response.clone().text().then(text => {
+                    if (detectRoute().key !== route.key) return;
+                    native.responses += 1;
+                    for (const value of parsePayload(text)) ingestPayload(value, route);
+                  }).catch(() => {});
+                } catch (_) {}
+              } else recordNativeFailure(url, response.status);
+            }
+            return response;
+          });
+        });
+        native.hooks.push('fetch');
+      } catch (_) {}
+    }
+    try {
+      const proto = win.XMLHttpRequest?.prototype;
+      if (!proto) return;
+      const open = proto.open;
+      const send = proto.send;
+      const contexts = new WeakMap();
+      proto.open = expose(function (method, url, ...rest) {
+        contexts.set(this, { url: observedEndpoint(String(url)), route: detectRoute() });
+        return open.call(this, method, url, ...rest);
       });
-      return id;
-    } catch (_) {
-      return '';
+      proto.send = expose(function (...args) {
+        const context = contexts.get(this);
+        if (context?.url) {
+          native.requests += 1;
+          this.addEventListener('load', () => {
+            if (detectRoute().key !== context.route.key) return;
+            if (this.status < 200 || this.status >= 300) { recordNativeFailure(context.url, this.status); return; }
+            try {
+              native.responses += 1;
+              const values = this.responseType === 'json' ? [this.response] : parsePayload(this.responseText);
+              for (const value of values) ingestPayload(value, context.route);
+            } catch (_) {}
+          }, { once: true });
+        }
+        return send.apply(this, args);
+      });
+      native.hooks.push('XHR');
+    } catch (_) {}
+  }
+
+  function checkSession(generation, route, signal) {
+    if (signal?.aborted || generation !== state.generation || route.key !== detectRoute().key || !state.opened) {
+      throw new DOMException('Gallery session changed or closed', 'AbortError');
     }
+  }
+
+  function pendingNativeItems() {
+    return [...native.items.entries()].filter(([key, value]) => state.nativeConsumed.get(key) !== value.signature);
+  }
+
+  function takeNativePage(waiting = false) {
+    const pending = pendingNativeItems();
+    for (const [key, value] of pending) state.nativeConsumed.set(key, value.signature);
+    return {
+      items: pending.map(([, value]) => value.media),
+      next_max_id: `native:${++state.nativeStep}`,
+      more_available: native.pageInfo?.more !== false,
+      __native: true, __waiting: waiting && !pending.length,
+      __preview: pending.some(([, value]) => value.media.__preview),
+    };
+  }
+
+  function scrollInstagram() {
+    const main = doc.querySelector('main');
+    let target = main;
+    while (target && target !== doc.body && target !== doc.documentElement) {
+      const style = win.getComputedStyle(target);
+      if (/(auto|scroll)/.test(style.overflowY) && target.scrollHeight > target.clientHeight + 80) break;
+      target = target.parentElement;
+    }
+    target = target && target !== doc.body && target !== doc.documentElement ? target : (doc.scrollingElement || doc.documentElement);
+    const top = Math.max(0, target.scrollHeight - target.clientHeight);
+    if (target === doc.scrollingElement || target === doc.documentElement) win.scrollTo({ top, behavior: 'instant' });
+    else target.scrollTo({ top, behavior: 'instant' });
+    target.dispatchEvent(new win.Event('scroll', { bubbles: true }));
+  }
+
+  async function fetchPage(_cursor, signal) {
+    const generation = state.generation;
+    const route = detectRoute();
+    checkSession(generation, route, signal);
+    scanPageData(route);
+    scanVisibleMedia(route);
+    if (pendingNativeItems().length || native.pageInfo?.more === false) return takeNativePage();
+    if (route.mode === 'post') return takeNativePage(true);
+    ui.setStatus('Waiting for Instagram to load the next posts…');
+    scrollInstagram();
+    const until = Date.now() + 6500;
+    while (Date.now() < until) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      checkSession(generation, route, signal);
+      scanPageData(route);
+      scanVisibleMedia(route);
+      if (pendingNativeItems().length || native.pageInfo?.more === false) return takeNativePage();
+    }
+    return takeNativePage(true);
+  }
+
+  function diagnosticReport() {
+    return JSON.stringify({
+      version: VERSION, mode: state.mode, loader: 'Instagram page responses',
+      hooks: native.hooks, observedRequests: native.requests, capturedResponses: native.responses,
+      cachedPosts: native.items.size, renderedMedia: state.media.length, paused: state.autoPaused,
+      pagesLoaded: state.pagesLoaded, moreKnown: native.pageInfo?.more ?? null,
+      recentHttpErrors: native.errors, failedMedia: state.stats.failures,
+      previewMedia: state.media.filter(item => item.preview).length,
+    }, null, 2);
   }
 
   function resetSession(route = detectRoute()) {
@@ -250,6 +535,13 @@
     state.mode = route.mode;
     state.username = route.username;
     state.userId = '';
+    state.nativeConsumed = new Map();
+    state.nativeStep = 0;
+    state.autoPaused = false;
+    state.starting = false;
+    state.mediaById = new Map();
+    refreshRequests.clear();
+    routeCache(route);
     state.nextCursor = null;
     state.hasMore = false;
     state.exhausted = false;
@@ -266,69 +558,27 @@
   }
 
   async function startSession() {
-    const route = detectRoute();
-    if (route.key !== state.routeKey) resetSession(route);
-    ui.setStatus('Preparing gallery…');
-
+    if (state.starting || !state.opened) return;
+    const generation = state.generation;
+    state.starting = true;
     try {
-      if (state.mode === 'explore') throw new Error('Explore pages are not supported yet. Open a profile, tagged feed, home feed, post, or reel.');
-      if (state.mode === 'post') {
-        const harvested = harvestCurrentPost();
-        appendRawMedia(harvested);
-        state.exhausted = true;
-        state.hasMore = false;
-        ui.setStatus(`Loaded ${state.media.length} visible media item${state.media.length === 1 ? '' : 's'}.`);
-        ui.refresh();
-        return;
-      }
-      if (state.mode === 'profile' || state.mode === 'tagged') {
-        state.controller = new AbortController();
-        state.userId = await resolveUserId(state.username, state.controller.signal);
-        if (!state.userId) throw new Error(`Could not resolve @${state.username}. Reload Instagram and try again.`);
-      }
+      if (state.mode === 'explore') throw new Error('Open a profile, tagged feed, home feed, post, or reel.');
+      if (state.mode === 'profile' && !state.username) throw new Error('Open an Instagram profile first.');
       await loadNextPage();
     } catch (error) {
-      if (error?.name !== 'AbortError') {
-        ui.setStatus(`Error: ${error.message || error}`);
+      if (generation === state.generation && error?.name !== 'AbortError') {
+        state.autoPaused = true;
+        ui.setStatus(`Gallery: ${error.message || error}`);
         ui.toast(error.message || String(error), 'error', 5000);
       }
+    } finally {
+      if (generation === state.generation) state.starting = false;
     }
-  }
-
-  async function fetchPage(cursor, signal) {
-    const requestHeaders = headers();
-    let url;
-    let method = 'GET';
-    let body;
-
-    if (state.mode === 'profile') {
-      url = `https://i.instagram.com/api/v1/feed/user/${encodeURIComponent(state.userId)}/?count=12`;
-      if (cursor) url += `&max_id=${encodeURIComponent(cursor)}`;
-    } else if (state.mode === 'tagged') {
-      url = `https://i.instagram.com/api/v1/usertags/${encodeURIComponent(state.userId)}/feed/?count=12`;
-      if (cursor) url += `&max_id=${encodeURIComponent(cursor)}`;
-    } else if (state.mode === 'home') {
-      url = 'https://i.instagram.com/api/v1/feed/timeline/';
-      method = 'POST';
-      body = new URLSearchParams({
-        is_async_ads_rti: '0',
-        is_async_ads_double_request: '0',
-        rti_delivery_backend: '0',
-        is_async_ads_in_headload_enabled: '0',
-      });
-      const deviceId = win._sharedData?.device_id || getCookie('ig_did') || getCookie('mid');
-      if (deviceId) body.set('device_id', deviceId);
-      if (cursor) body.set('max_id', cursor);
-      requestHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
-    } else {
-      throw new Error(`Pagination is unavailable in ${state.mode} mode.`);
-    }
-
-    return requestJson(url, { method, headers: requestHeaders, body, signal });
   }
 
   function extractPage(json) {
-    const timeline = json?.data?.user?.edge_owner_to_timeline_media
+    const timeline = json?.data?.xdt_api__v1__feed__user_timeline_graphql_connection
+      || json?.data?.user?.edge_owner_to_timeline_media
       || json?.user?.edge_owner_to_timeline_media
       || json?.edge_owner_to_timeline_media;
 
@@ -351,7 +601,7 @@
   }
 
   async function loadNextPage() {
-    if (state.loading || state.exhausted) return { added: 0 };
+    if (state.loading || state.exhausted || !state.opened) return { added: 0, busy: state.loading };
     if (state.settings.maxPages > 0 && state.pagesLoaded >= state.settings.maxPages) {
       state.exhausted = true;
       state.hasMore = false;
@@ -359,55 +609,38 @@
       ui.refresh();
       return { added: 0 };
     }
-
     const generation = state.generation;
-    const routeKey = state.routeKey;
-    const requestedCursor = state.nextCursor;
-    const cursorKey = requestedCursor ?? '__first__';
-
-    if (state.seenCursors.has(cursorKey)) {
-      state.exhausted = true;
-      state.hasMore = false;
-      ui.setStatus('Stopped: Instagram repeated the same pagination cursor.');
-      ui.refresh();
-      return { added: 0 };
-    }
-
-    state.seenCursors.add(cursorKey);
+    const route = detectRoute();
     state.loading = true;
     state.controller?.abort();
     state.controller = new AbortController();
-    ui.setStatus(state.pagesLoaded ? 'Loading more media…' : 'Loading media…');
+    state.autoPaused = false;
+    ui.setStatus(state.pagesLoaded ? 'Loading more media…' : 'Reading Instagram media…');
     ui.refresh();
-
     try {
-      const json = await fetchPage(requestedCursor, state.controller.signal);
-      if (generation !== state.generation || routeKey !== state.routeKey) return { added: 0, stale: true };
-
-      const page = extractPage(json);
+      const json = await fetchPage(state.nextCursor, state.controller.signal);
+      checkSession(generation, route, state.controller.signal);
       const before = state.media.length;
-      appendRawMedia(page.items);
+      appendRawMedia(json.items);
       const added = state.media.length - before;
-
-      state.pagesLoaded += 1;
-      state.nextCursor = page.cursor;
-      state.hasMore = page.more;
-
-      if (!page.cursor || page.cursor === requestedCursor || (page.cursor && state.seenCursors.has(page.cursor))) {
-        state.hasMore = false;
-        state.exhausted = true;
+      if (json.items.length) state.pagesLoaded += 1;
+      state.nextCursor = json.next_max_id;
+      state.hasMore = json.more_available;
+      state.exhausted = !state.hasMore;
+      state.autoPaused = Boolean(json.__waiting);
+      if (json.__waiting) {
+        ui.setStatus('Instagram has not returned more posts. Close the gallery to check the page, then reopen or press Load more.');
+      } else {
+        ui.setStatus(`${added ? `Loaded ${added} new media items` : 'Updated loaded media'}${state.exhausted ? ' — end reached.' : '.'}${json.__preview ? ' Visible-page previews are shown until full-size data arrives.' : ''}`);
       }
-
-      ui.setStatus(added
-        ? `Loaded ${added} new item${added === 1 ? '' : 's'}${state.hasMore ? '.' : ' — end reached.'}`
-        : state.hasMore ? 'This page contained no new media.' : 'No more media found.');
       ui.refresh();
-      return { added };
+      return { added, waiting: json.__waiting };
     } catch (error) {
+      if (generation !== state.generation || route.key !== detectRoute().key) return { added: 0, stale: true };
       if (error?.name === 'AbortError') return { added: 0, aborted: true };
-      state.seenCursors.delete(cursorKey);
-      ui.setStatus(`Load failed: ${error.message || error}`);
-      ui.toast(`Load failed: ${error.message || error}`, 'error', 5000);
+      state.autoPaused = true;
+      ui.setStatus(`Gallery failed: ${error.message || error}`);
+      ui.toast(`Gallery failed: ${error.message || error}`, 'error', 5000);
       return { added: 0, error };
     } finally {
       if (generation === state.generation) {
@@ -434,7 +667,7 @@
     const result = [];
     for (const group of groups) {
       for (const candidate of Array.isArray(group) ? group : []) {
-        const url = candidate?.url || candidate?.src;
+        const url = normalizeMediaUrl(candidate?.url || candidate?.src);
         if (!url || seen.has(url)) continue;
         seen.add(url);
         result.push({
@@ -517,8 +750,22 @@
           return;
         }
 
-        const stableId = String(child.pk || child.id || `${shortcode}:${index}` || sources[0].url);
+        const stableId = String(shortcode ? `${shortcode}:${index}` : (child.pk || child.id || sources[0].url));
         if (state.seenMedia.has(stableId)) {
+          const previous = state.mediaById.get(stableId);
+          if (previous && (!parent.__preview || previous.preview)) {
+            const changed = JSON.stringify(previous.sources) !== JSON.stringify(sources);
+            previous.preview = Boolean(parent.__preview);
+            previous.mediaId = String(child.pk || child.id || previous.mediaId || '');
+            previous.postId = String(parent.pk || parent.id || previous.postId || '');
+            if (changed) {
+              previous.sources = sources;
+              previous.mediaUrl = sources[0].url;
+              previous.sourceIndex = 0;
+              const element = previous.card?.querySelector('img, video');
+              if (element) setSourceWithFallback(element, previous);
+            }
+          }
           state.stats.duplicates += 1;
           return;
         }
@@ -527,6 +774,9 @@
         const posterSources = type === 'video' ? imageCandidates(child).concat(imageCandidates(parent)) : [];
         const entry = {
           id: stableId,
+          preview: Boolean(parent.__preview),
+          mediaId: String(child.pk || child.id || ''),
+          postId: String(parent.pk || parent.id || ''),
           type,
           sources,
           sourceIndex: 0,
@@ -545,7 +795,9 @@
 
         const mediaIndex = state.media.length;
         state.media.push(entry);
-        fragment.appendChild(ui.createCard(entry, mediaIndex));
+        entry.card = ui.createCard(entry, mediaIndex);
+        state.mediaById.set(stableId, entry);
+        fragment.appendChild(entry.card);
         if (type === 'video') state.stats.videos += 1;
         else state.stats.images += 1;
       });
@@ -554,61 +806,105 @@
     ui.gallery.appendChild(fragment);
   }
 
-  function setSourceWithFallback(element, entry, poster = false) {
-    const candidates = poster ? [{ url: entry.posterUrl }].filter(item => item.url) : entry.sources;
-    let index = 0;
+  async function refreshedSources(entry, signal) {
+    const route = detectRoute();
+    const cached = routeCache(route).items.get(entry.shortcode)?.media;
+    function sourcesOf(parent) {
+      if (!parent) return [];
+      const children = parent.carousel_media || parent.carousel_media_items
+        || parent.edge_sidecar_to_children?.edges?.map(edge => edge.node) || [parent];
+      const child = children.find(item => entry.mediaId && String(item.pk || item.id) === entry.mediaId)
+        || children[entry.carouselIndex];
+      return entry.type === 'video' ? videoCandidates(child) : imageCandidates(child);
+    }
+    const fromPage = sourcesOf(cached);
+    if (fromPage.some(source => !entry.sources.some(old => old.url === source.url))) return fromPage;
+    const id = entry.postId || entry.mediaId;
+    if (!/^\d+(?:_\d+)?$/.test(id)) return [];
+    if (!refreshRequests.has(id)) {
+      const url = new URL(`/api/v1/media/${encodeURIComponent(id)}/info/`, location.origin).href;
+      const request = requestJson(url, { headers: headers(), signal }).then(json => {
+        if (json?.status === 'fail' || !Array.isArray(json?.items)) throw new Error('Instagram did not return refreshed media.');
+        return json.items[0];
+      }).catch(error => {
+        if (error?.status) recordNativeFailure(new URL(url), error.status);
+        throw error;
+      });
+      refreshRequests.set(id, request);
+    }
+    return sourcesOf(await refreshRequests.get(id));
+  }
 
-    const apply = () => {
-      const candidate = candidates[index];
-      if (!candidate) {
-        state.stats.failures += 1;
-        element.closest('.media-card')?.classList.add('broken');
-        ui.refresh();
-        return;
-      }
-      element.src = candidate.url;
-      if (!poster) {
-        entry.sourceIndex = index;
+  function setSourceWithFallback(element, entry, poster = false) {
+    mediaBindings.get(element)?.();
+    let candidates = poster ? [{ url: entry.posterUrl }].filter(item => item.url) : entry.sources;
+    candidates = [...new Map(candidates.map(source => [source.url, source])).values()];
+    const preferred = candidates.findIndex(source => source.url === entry.mediaUrl);
+    if (preferred > 0) candidates = [candidates[preferred], ...candidates.filter((_, index) => index !== preferred)];
+    const tried = new Set();
+    const generation = state.generation;
+    const controller = new AbortController();
+    let active = true;
+    let recovering = false;
+    let refreshed = false;
+    let failed = false;
+    let candidate;
+    const dispose = () => {
+      active = false;
+      controller.abort();
+      element.removeEventListener('error', onError);
+      element.removeEventListener('load', onReady);
+      element.removeEventListener('loadedmetadata', onReady);
+    };
+    const onReady = () => {
+      if (!active) return;
+      entry.card?.classList.remove('broken');
+      if (failed) { state.stats.failures = Math.max(0, state.stats.failures - 1); failed = false; }
+      if (!poster && candidate) {
         entry.mediaUrl = candidate.url;
         entry.width = candidate.width || entry.width;
         entry.height = candidate.height || entry.height;
       }
     };
-
-    element.addEventListener('error', () => {
-      index += 1;
-      apply();
-    });
-    apply();
-  }
-
-  function harvestCurrentPost() {
-    const shortcode = location.pathname.match(/^\/(?:p|reel|tv)\/([^/?#]+)/)?.[1] || '';
-    const caption = doc.querySelector('article h1, article span[dir="auto"]')?.textContent || '';
-    const result = [];
-
-    for (const img of doc.querySelectorAll('article img[src], main img[src]')) {
-      const url = img.currentSrc || img.src;
-      if (!url) continue;
-      result.push({
-        code: shortcode,
-        caption: { text: caption },
-        image_versions2: { candidates: [{ url, width: img.naturalWidth, height: img.naturalHeight }] },
-      });
-    }
-
-    for (const video of doc.querySelectorAll('article video[src], main video[src]')) {
-      const url = video.currentSrc || video.src;
-      if (!url) continue;
-      result.push({
-        code: shortcode,
-        caption: { text: caption },
-        is_video: true,
-        video_url: url,
-        image_versions2: { candidates: video.poster ? [{ url: video.poster }] : [] },
-      });
-    }
-    return result;
+    const finalError = () => {
+      if (!active || generation !== state.generation || failed) return;
+      failed = true;
+      state.stats.failures += 1;
+      entry.card?.classList.add('broken');
+      element.title = 'Instagram could not load this media. Open the original post to check it.';
+      ui.refresh();
+    };
+    const apply = () => {
+      if (!active || generation !== state.generation) return;
+      candidate = candidates.find(source => !tried.has(source.url));
+      if (!candidate) return false;
+      tried.add(candidate.url);
+      element.src = candidate.url;
+      return true;
+    };
+    const onError = async () => {
+      if (!active || recovering || generation !== state.generation) return;
+      if (apply()) return;
+      if (!poster && !refreshed) {
+        refreshed = true;
+        recovering = true;
+        try {
+          const fresh = await refreshedSources(entry, controller.signal);
+          if (!active || generation !== state.generation) return;
+          candidates = [...candidates, ...fresh];
+          if (fresh.length) entry.sources = fresh;
+          if (apply()) return;
+        } catch (_) {}
+        finally { recovering = false; }
+      }
+      finalError();
+    };
+    mediaBindings.set(element, dispose);
+    element.referrerPolicy = 'no-referrer';
+    element.addEventListener('error', onError);
+    element.addEventListener('load', onReady);
+    element.addEventListener('loadedmetadata', onReady);
+    if (!apply()) finalError();
   }
 
   function sanitizeFilename(value) {
@@ -632,41 +928,82 @@
     return `${user}_${code}${slide}.${extensionFor(entry)}`;
   }
 
-  function downloadEntry(entry) {
+  function managerDownload(url, name) {
+    return new Promise((resolve, reject) => {
+      if (typeof GM_download !== 'function') return reject(new Error('Manager download unavailable'));
+      try {
+        GM_download({ url, name, saveAs: false, timeout: 120000,
+          onload: resolve,
+          onerror: () => reject(new Error('Manager download failed')),
+          ontimeout: () => reject(new Error('Download timed out')) });
+      } catch (error) { reject(error); }
+    });
+  }
+
+  async function downloadBlob(url) {
+    let blob;
+    if (typeof GM_xmlhttpRequest === 'function') {
+      blob = await new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({ method: 'GET', url, responseType: 'blob', timeout: 120000,
+          onload: response => response.status >= 200 && response.status < 300
+            ? resolve(response.response) : reject(new Error(`HTTP ${response.status}`)),
+          onerror: () => reject(new Error('Media download failed')),
+          ontimeout: () => reject(new Error('Download timed out')) });
+      });
+    } else {
+      const response = await (originalFetch || win.fetch.bind(win))(url, { credentials: 'omit', referrerPolicy: 'no-referrer' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      blob = await response.blob();
+    }
+    if (!blob || !blob.size || (blob.type && !/^(image\/|video\/|application\/octet-stream)/i.test(blob.type))) {
+      throw new Error('Instagram returned no downloadable media');
+    }
+    return blob;
+  }
+
+  function saveBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const anchor = doc.createElement('a');
+    anchor.href = url;
+    anchor.download = name;
+    doc.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+
+  async function downloadEntry(entry) {
     if (!entry || entry.downloadState === 'running') {
       if (entry) ui.toast('That download is already running.', 'warning');
       return;
     }
 
     entry.downloadState = 'running';
-    const name = filenameFor(entry);
     ui.toast(`${entry.type === 'video' ? 'Video' : 'Image'} download started.`, 'info');
-
-    const done = () => {
-      entry.downloadState = 'done';
-      ui.toast(`Downloaded ${name}`, 'success', 3500);
-    };
-    const failed = error => {
-      entry.downloadState = 'idle';
-      ui.toast(`Download failed. Opening the full-resolution media instead.`, 'error', 4500);
-      win.open(entry.mediaUrl, '_blank', 'noopener');
-      console.warn('IG Gallery download failed', error);
-    };
-
+    const tried = new Set();
+    let failure;
     try {
-      if (typeof GM_download === 'function') {
-        GM_download({ url: entry.mediaUrl, name, saveAs: false, onload: done, onerror: failed, ontimeout: failed });
-      } else {
-        const anchor = doc.createElement('a');
-        anchor.href = entry.mediaUrl;
-        anchor.download = name;
-        anchor.target = '_blank';
-        anchor.rel = 'noopener';
-        anchor.click();
-        done();
+      let candidates = [{ url: entry.mediaUrl }, ...entry.sources];
+      for (let pass = 0; pass < 2; pass += 1) {
+        for (const candidate of candidates) {
+          if (!candidate.url || tried.has(candidate.url)) continue;
+          tried.add(candidate.url);
+          const name = filenameFor({ ...entry, mediaUrl: candidate.url });
+          try {
+            try { await managerDownload(candidate.url, name); }
+            catch (_) { saveBlob(await downloadBlob(candidate.url), name); }
+            entry.mediaUrl = candidate.url;
+            entry.downloadState = 'done';
+            ui.toast(`Download sent to browser: ${name}`, 'success', 3500);
+            return;
+          } catch (error) { failure = error; }
+        }
+        if (pass === 0) candidates = await refreshedSources(entry);
       }
+      throw failure || new Error('No downloadable media URL is available');
     } catch (error) {
-      failed(error);
+      entry.downloadState = 'idle';
+      ui.toast(`Download failed: ${error.message || error}. Open the original post and try again.`, 'error', 5000);
     }
   }
 
@@ -682,9 +1019,9 @@
     ui.toast('Loading every available page. Press Stop to cancel.', 'info', 4000);
     ui.refresh();
 
-    while (state.loadAll && !state.exhausted) {
+    while (state.loadAll && state.opened && !state.exhausted) {
       const result = await loadNextPage();
-      if (result?.error || result?.aborted || result?.stale) break;
+      if (result?.error || result?.aborted || result?.stale || result?.waiting || result?.busy) break;
       if (!state.hasMore) break;
       await new Promise(resolve => setTimeout(resolve, 450));
     }
@@ -698,7 +1035,7 @@
   function copyText(text, label = 'Copied') {
     try {
       if (typeof GM_setClipboard === 'function') GM_setClipboard(text, 'text');
-      else navigator.clipboard.writeText(text);
+      else return navigator.clipboard.writeText(text).then(() => ui.toast(label, 'success')).catch(() => ui.toast('Copy failed.', 'error'));
       ui.toast(label, 'success');
     } catch (_) {
       ui.toast('Copy failed.', 'error');
@@ -729,7 +1066,7 @@
       <button class="launcher" type="button"><b>IG</b><span>Gallery</span></button>
       <section class="app hidden" data-theme="dark" data-layout="fit" data-filter="all" data-captions="off" data-size="large" data-thumbnails="contain">
         <header class="toolbar">
-          <div class="brand"><strong>IG Full-Size Gallery</strong><span class="pill mode">idle</span><span class="pill count">0 media</span></div>
+          <div class="brand"><strong>IG Gallery ${VERSION}</strong><span class="pill mode">idle</span><span class="pill count">0 media</span></div>
           <div class="controls">
             <button data-action="layout">Layout: Fit</button>
             <button data-action="filter">Filter: All</button>
@@ -738,6 +1075,7 @@
             <button data-action="load">Load more</button>
             <button data-action="load-all">Load all</button>
             <button data-action="export">Export URLs</button>
+            <button data-action="diagnostics">Copy diagnostics</button>
             <button data-action="settings">Settings</button>
             <button class="danger" data-action="close">Close</button>
           </div>
@@ -839,9 +1177,11 @@
       applySettings();
       ensureObserver();
       const route = detectRoute();
-      if (route.key !== state.routeKey || !state.media.length) {
+      if (route.key !== state.routeKey || (!state.media.length && !state.starting)) {
         resetSession(route);
         startSession();
+      } else if (state.autoPaused || pendingNativeItems().length) {
+        loadNextPage();
       }
     }
 
@@ -853,6 +1193,8 @@
       host.style.pointerEvents = 'none';
       launcher.style.pointerEvents = 'auto';
       state.loadAll = false;
+      state.controller?.abort();
+      state.observer?.disconnect();
     }
 
     function applySettings() {
@@ -865,6 +1207,10 @@
       app.dataset.thumbnails = settings.thumbnailMode;
       app.dataset.viewerSize = settings.viewerSize;
       launcher.dataset.position = settings.launcherPosition;
+      lightbox.classList.toggle('controls-hidden', settings.hideViewerControls);
+      const controlsToggle = $('.viewer-controls-toggle');
+      controlsToggle.textContent = settings.hideViewerControls ? 'Show controls' : 'Hide controls';
+      controlsToggle.setAttribute('aria-pressed', String(settings.hideViewerControls));
 
       $('[data-action="layout"]').textContent = `Layout: ${{ fit: 'Fit', masonry: 'Masonry', classic: 'Classic', contact: 'Contact' }[settings.layout]}`;
       $('[data-action="filter"]').textContent = `Filter: ${{ all: 'All', image: 'Images', video: 'Videos' }[settings.filter]}`;
@@ -1074,7 +1420,7 @@
             openViewer(previousLength);
             return;
           }
-          if (result?.error) return;
+          if (result?.error || result?.waiting || result?.busy || result?.aborted || result?.stale) return;
         }
         openViewer(0);
         toast('Reached the end and returned to the first item.', 'info');
@@ -1089,7 +1435,7 @@
       if (!('IntersectionObserver' in win)) return;
       state.observer = new IntersectionObserver(entries => {
         if (!entries.some(entry => entry.isIntersecting)) return;
-        if (state.settings.autoLoad && state.hasMore && !state.loading && !state.exhausted && !state.loadAll) loadNextPage();
+        if (state.opened && !state.autoPaused && state.settings.autoLoad && state.hasMore && !state.loading && !state.exhausted && !state.loadAll) loadNextPage();
       }, { root: scroller, rootMargin: '800px 0px' });
       state.observer.observe(sentinel);
     }
@@ -1124,6 +1470,7 @@
       if (action === 'load') loadNextPage();
       if (action === 'load-all') toggleLoadAll();
       if (action === 'export') exportUrls();
+      if (action === 'diagnostics') copyText(diagnosticReport(), 'Diagnostics copied.');
       if (action === 'settings') $('.settings').classList.toggle('hidden');
       if (action === 'reset') {
         state.settings = { ...DEFAULTS };
@@ -1132,10 +1479,9 @@
       }
       if (action === 'viewer-close') closeViewer();
       if (action === 'toggle-controls') {
-        const hidden = lightbox.classList.toggle('controls-hidden');
-        const toggle = $('.viewer-controls-toggle');
-        toggle.textContent = hidden ? 'Show controls' : 'Hide controls';
-        toggle.setAttribute('aria-pressed', String(hidden));
+        state.settings.hideViewerControls = !state.settings.hideViewerControls;
+        saveSettings();
+        applySettings();
       }
       if (action === 'prev') moveViewer(-1);
       if (action === 'next') moveViewer(1);
@@ -1268,7 +1614,7 @@
     applySettings();
 
     return {
-      root, gallery, open, close, setStatus, toast, clearGallery, refresh, createCard,
+      root, gallery, open, close, setStatus, toast, clearGallery, refresh, createCard, applySettings,
     };
   }
 
@@ -1297,7 +1643,8 @@
 
   function registerMenus() {
     if (typeof GM_registerMenuCommand !== 'function') return;
-    GM_registerMenuCommand('Open Full-Size Instagram Gallery', () => ui.open());
+    GM_registerMenuCommand(`Open Instagram Gallery ${VERSION}`, () => ui.open());
+    GM_registerMenuCommand('Copy gallery diagnostics', () => copyText(diagnosticReport()));
     GM_registerMenuCommand('Toggle automatic loading', () => {
       state.settings.autoLoad = !state.settings.autoLoad;
       saveSettings();
@@ -1307,7 +1654,7 @@
       state.settings = { ...DEFAULTS };
       saveSettings();
       ui?.toast('Settings reset.', 'success');
-      ui?.refresh();
+      ui?.applySettings();
     });
   }
 
@@ -1332,6 +1679,8 @@
     win.addEventListener('popstate', changed);
     win.setInterval(changed, 1000);
   }
+
+  installResponseCapture();
 
   ready(() => {
     ui = createUI();

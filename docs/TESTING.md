@@ -23,6 +23,7 @@ Disable every older copy of the userscript before testing. Test the exact file/v
 - Navigate previous/next with the footer hidden and confirm it remains hidden.
 - Click **Show controls** and confirm the complete footer returns with metadata and actions intact.
 - Confirm the hide/show toggle remains available while the footer is hidden.
+- Close/reopen the viewer and gallery, then reload Instagram; confirm the footer stays hidden and **Show controls** restores it.
 - Test Compact, Comfortable, and Large viewer opening sizes.
 
 ## Zoom and pan
@@ -52,6 +53,8 @@ Disable every older copy of the userscript before testing. Test the exact file/v
 - Confirm success/error toasts make download state obvious.
 - Confirm a second click while the same media is actively downloading is rejected cleanly.
 - Confirm the downloaded extension matches the media type.
+- Disable manager-native downloads and confirm the blob fallback saves image/video data rather than opening a remote URL.
+- Test an expired URL; confirm refresh is bounded and failure never reports download success.
 - Test **Open media**, **Open post**, **Copy post URL**, **Copy media URL**, and **Export URLs**.
 
 ## Routes and failures
@@ -63,15 +66,17 @@ Disable every older copy of the userscript before testing. Test the exact file/v
 - Test the home feed where the current Instagram session permits it.
 - Test an individual post/reel page.
 - Confirm a failed media URL falls back or reports a clear error.
-- If normal `fetch()` fails, confirm the userscript-manager request fallback either succeeds or surfaces a clear error.
+- Confirm the gallery reads visible posts and native page responses without profile lookup/feed REST requests.
+- Confirm a no-progress timeout pauses automatic loading, leaves **Load more** available, and does not wrap the viewer as though the feed ended.
+- Use **Copy diagnostics** and verify the version, captured-response count, and failed endpoint/status details.
 
 ## Release verification
 
 Before publishing:
 
 ```bash
-node --check instagram-full-size-gallery-downloader.user.js
-node scripts/validate-userscript.mjs
+npm ci
+npm test
 ```
 
 Then install the release source through the same channel users will use (especially Greasy Fork), disable local development copies, and repeat the high-risk viewer, pagination, and download checks above.
