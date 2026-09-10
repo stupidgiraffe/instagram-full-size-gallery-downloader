@@ -9,7 +9,7 @@ const requiredMetadata = [
   '// @name         Instagram Full-Size Gallery & Downloader',
   '// @namespace    https://github.com/stupidgiraffe/instagram-full-size-gallery-downloader',
   '// @license      AGPL-3.0-or-later',
-  '// @version      2.1.7',
+  '// @version      2.1.8',
   '// @contributionURL https://buymeacoffee.com/stupidgiraffe',
   '// @grant        GM_download',
   '// @grant        GM_xmlhttpRequest',

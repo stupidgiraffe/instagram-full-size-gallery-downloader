@@ -170,7 +170,7 @@ Common symptoms:
 - **A download fails:** the script tries available media URLs, a blob download, and one expired-media refresh. It reports failure if these fail; opening a remote URL does not count as a successful download.
 - **HTTP 404 during gallery loading:** v2.1.6 reads Instagram's own page data and native responses, without requesting the old profile/feed REST routes. Use **Copy diagnostics** to include the script version and failed endpoint/status in a report.
 - **Waiting for more posts:** the gallery has paused because Instagram did not return more media. Close the gallery, check that Instagram itself loads the posts, then reopen or press **Load more**. A timeout does not count as the end of the feed.
-- **Only a cover appears:** v2.1.7 automatically requests complete post details and expands every available slide. If Instagram rejects that request, the post is labeled incomplete; use **Retry incomplete posts**. The script does not count an unresolved cover as a complete carousel.
+- **Only a cover appears:** v2.1.8 automatically requests complete post details and expands every available slide. If Instagram rejects that request, the post is labeled incomplete; use **Retry incomplete posts**. The script does not count an unresolved cover as a complete carousel. If retry fails, copy diagnostics and include `postDetailErrors`; these distinguish HTML responses, GraphQL errors, and missing matching post data.
 
 Use the [bug-report template](https://github.com/stupidgiraffe/instagram-full-size-gallery-downloader/issues/new/choose) for reproducible regressions.
 

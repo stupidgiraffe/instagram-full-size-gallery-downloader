@@ -13,7 +13,7 @@
 // @compatible   brave
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
-// @version      2.1.7
+// @version      2.1.8
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -173,7 +173,7 @@
         url,
         headers: options.headers || {},
         data: options.body instanceof URLSearchParams ? options.body.toString() : options.body,
-        responseType: 'json',
+        responseType: 'text',
         timeout: 30000,
         onload: response => {
           if (response.status < 200 || response.status >= 300) {
@@ -183,7 +183,7 @@
             return;
           }
           try {
-            const value = response.response ?? JSON.parse(response.responseText);
+            const value = decodeResponse(response.responseText ?? response.response);
             resolve(value);
           } catch (error) {
             reject(new Error(`Invalid JSON: ${error.message}`));
@@ -211,10 +211,10 @@
         error.status = response.status;
         throw error;
       }
-      return await response.json();
+      return decodeResponse(await response.text());
     } catch (error) {
       if (error?.name === 'AbortError') throw error;
-      if (error?.status) throw error;
+      if (error?.status || error?.responseFormat) throw error;
       return gmJson(url, options);
     }
   }
@@ -236,7 +236,7 @@
     };
   }
 
-  const VERSION = '2.1.7';
+  const VERSION = '2.1.8';
   const POST_QUERY_ID = '27128499623469141';
   const native = {
     key: '', items: new Map(), scripts: new WeakSet(), sequence: 0,
@@ -347,20 +347,28 @@
   }
 
   function detailMedia(json, original) {
-    const data = json?.data || {};
-    const candidates = [
-      ...(data.xdt_api__v1__media__shortcode__web_info?.items || []),
-      data.xdt_shortcode_media, data.shortcode_media,
-      ...(json?.items || []),
-    ];
     const code = original.code || original.shortcode;
     const id = mediaIdForPost(original).split('_')[0];
-    return candidates.find(media => {
-      if (!media) return false;
+    const candidates = [];
+    const seen = new WeakSet();
+    let remaining = 24000;
+    function walk(media, depth = 0) {
+      if (!media || depth > 45 || --remaining < 0) return;
+      if (typeof media === 'string') {
+        if (/^[\[{]/.test(media.trim())) for (const value of parsePayload(media)) walk(value, depth + 1);
+        return;
+      }
+      if (typeof media !== 'object' || seen.has(media)) return;
+      seen.add(media);
       const returnedCode = media.code || media.shortcode;
-      if (code && returnedCode) return returnedCode === code;
-      return id && String(media.pk || media.id || '').split('_')[0] === id;
-    });
+      const matches = code && returnedCode ? returnedCode === code
+        : id && String(media.pk || media.id || '').split('_')[0] === id;
+      if (matches && isMediaNode(media)) candidates.push(media);
+      for (const child of Object.values(media)) walk(child, depth + 1);
+    }
+    walk(json);
+    return candidates.sort((a, b) => Number(postShape(b).complete) - Number(postShape(a).complete)
+      || postShape(b).children.length - postShape(a).children.length)[0];
   }
 
   async function requestPostJson(url, options, signal) {
@@ -393,6 +401,7 @@
     const id = mediaIdForPost(original);
     if (id) requests.push({ url: new URL(`/api/v1/media/${encodeURIComponent(id)}/info/`, location.origin).href, options: { headers: headers() } });
     let failure = new Error('Instagram did not return every slide in this post');
+    const attempts = [];
     for (const request of requests) {
       checkSession(generation, route, signal);
       const cached = native.items.get(key)?.media;
@@ -409,21 +418,30 @@
           throw error;
         }
         const media = detailMedia(json, original);
-        if (!media) throw new Error('Instagram did not return this post');
+        if (!media) {
+          const envelopes = Array.isArray(json) ? json : [json];
+          const errors = envelopes.flatMap(value => Array.isArray(value?.errors) ? value.errors : []);
+          const codes = errors.map(error => error.code || error.extensions?.code).filter(Boolean).map(String).filter(value => /^[\w-]{1,60}$/.test(value));
+          throw new Error(errors.length ? `GraphQL returned ${errors.length} error(s)${codes.length ? ` (${codes.join(', ')})` : ''}` : 'Response contained no matching post');
+        }
         const owner = media.user?.username || media.owner?.username;
         if (route.mode === 'profile' && owner && owner.toLowerCase() !== route.username.toLowerCase()) throw new Error('Post owner did not match the profile');
         cacheMedia({ ...media, code: code || media.code, __preview: false }, route, 'post details');
         const result = native.items.get(key)?.media;
         if (result && postShape(result).complete) return result;
+        throw new Error('Matching post is missing full slide sources');
       } catch (error) {
         if (error?.name === 'AbortError') throw error;
         failure = error;
+        const endpoint = request.options.method === 'POST' ? 'graphql' : 'media-info';
+        attempts.push(`${endpoint}: ${error.message || String(error)}`);
         if ([401, 403, 429].includes(error?.status)) {
           state.detailPaused = true;
           throw error;
         }
       }
     }
+    failure.message = attempts.join('; ') || failure.message;
     throw failure;
   }
 
@@ -478,6 +496,15 @@
       try { values.push(JSON.parse(line)); } catch (_) {}
     }
     return values;
+  }
+
+  function decodeResponse(value) {
+    if (value && typeof value === 'object') return value;
+    const values = parsePayload(value);
+    if (values.length) return values.length === 1 ? values[0] : values;
+    const error = new Error(/^\s*</.test(value || '') ? 'Instagram returned HTML instead of post data' : 'Instagram returned an unreadable data response');
+    error.responseFormat = true;
+    throw error;
   }
 
   function ingestPayload(value, route, source = 'network') {
@@ -711,6 +738,7 @@
       incompletePosts: incompletePosts().length, postDetailRequests: state.detailRequests,
       postDetailFailures: [...state.detailJobs.values()].filter(job => job.status === 'failed').length,
       postDetailsPaused: state.detailPaused,
+      postDetailErrors: [...new Set([...state.detailJobs.values()].filter(job => job.status === 'failed').map(job => job.error))].slice(-8),
     }, null, 2);
   }
 

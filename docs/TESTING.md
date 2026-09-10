@@ -84,3 +84,7 @@ npm test
 ```
 
 Then install the release source through the same channel users will use (especially Greasy Fork), disable local development copies, and repeat the high-risk viewer, pagination, and download checks above.
+
+### Response formats (2.1.8)
+
+Automated fixtures cover prefixed JSON, newline-delimited nested post data, manager text responses, and HTML/GraphQL failure diagnostics. These fixtures verify parser behavior, not whether Instagram accepts requests in a particular logged-in session. On a live failure, include `postDetailErrors` from copied diagnostics.

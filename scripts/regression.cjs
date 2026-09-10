@@ -22,6 +22,26 @@ function stack(code, id, count=6, videoAt=-1) {
 }
 const postResponse=post=>Response.json({data:{xdt_api__v1__media__shortcode__web_info:{items:[post]}}});
 const cover=code=>`<a href="/p/${code}/"><img src="https://images.cdninstagram.com/${code}-cover.jpg" width="300" height="400"></a>`;
+test('Prefixed JSON post details expand all six slides without transport retry',async()=>{
+ const e=environment({html:cover('SIX'),fetcher:async()=>new Response('for (;;);'+JSON.stringify({data:{xdt_api__v1__media__shortcode__web_info:{items:[stack('SIX','74263')]}}}))});
+ try{e.open();await settle(30);assert.equal(e.test.state.media.length,6);assert.equal(e.calls.length,1);assert.equal(e.test.state.media.filter(item=>item.preview).length,0)}finally{e.close()}
+});
+test('Streamed nested post details select the full matching post instead of its summary',async()=>{
+ const summary=photo('SIX','74263');const full=stack('SIX','74263');
+ const e=environment({html:cover('SIX'),fetcher:async()=>new Response(JSON.stringify({data:{result:{media:summary}}})+'\n'+JSON.stringify({data:{result:{media:full}}}))});
+ try{e.open();await settle(30);assert.equal(e.test.state.media.length,6);assert.equal(e.calls.length,1)}finally{e.close()}
+});
+test('HTML and GraphQL failures expose endpoint reasons without a duplicate manager request',async()=>{
+ let managerCalls=0;
+ const e=environment({html:cover('SIX'),fetcher:async(url)=>url.includes('/graphql/')?new Response('<!doctype html><title>Login</title>'):Response.json({errors:[{message:'private server text',extensions:{code:'QUERY_FAILED'}}]})});
+ e.w.GM_xmlhttpRequest=()=>{managerCalls++;throw new Error('Unexpected duplicate request')};
+ try{e.open();await settle(30);assert.equal(e.calls.length,2);assert.equal(managerCalls,0);const report=JSON.parse(e.test.diagnosticReport());assert.equal(report.incompletePosts,1);assert.match(report.postDetailErrors[0],/graphql: Instagram returned HTML/);assert.match(report.postDetailErrors[0],/media-info: GraphQL returned 1 error\(s\) \(QUERY_FAILED\)/);assert(!report.postDetailErrors[0].includes('private server text'))}finally{e.close()}
+});
+test('Manager transport decodes prefixed text after native fetch fails',async()=>{
+ const e=environment({html:cover('SIX'),fetcher:async()=>{throw new TypeError('Failed to fetch')}});
+ e.w.GM_xmlhttpRequest=options=>{options.onload({status:200,responseText:'for (;;);'+JSON.stringify({items:[stack('SIX','74263')]})});return {abort(){}}};
+ try{e.open();await settle(30);assert.equal(e.test.state.media.length,6);assert.equal(e.calls.length,1)}finally{e.close()}
+});
 function environment({script=source,boot=null,html='',gm=new Map(),local=new Map(),fetcher=async()=>new Response('',{status:404}),instrument=true,fakeXHR=false}={}) {
  const dom = new JSDOM(`<!doctype html><html><body>${boot?`<script type="application/json" data-sjs>${JSON.stringify(boot)}</script>`:''}<main>${html}</main></body></html>`,{url:'https://www.instagram.com/alice/',runScripts:'outside-only',pretendToBeVisual:true});
  const w=dom.window, calls=[],menus=new Map();

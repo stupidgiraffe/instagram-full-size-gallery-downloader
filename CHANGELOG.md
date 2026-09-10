@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.8] - 2026-09-10
+
+### Fixed
+
+- Decode prefixed and newline-delimited JSON in active post requests and the userscript-manager transport, matching formats already supported by passive capture.
+- Find the matching post inside nested response envelopes and prefer its complete carousel over a summary in the same response.
+- Avoid retrying a successful HTTP response through a second transport solely because its body is HTML or unreadable.
+- Include distinct post-detail failure reasons and endpoint names in copied diagnostics; report GraphQL error counts/codes without dumping response bodies.
+
+### Validation
+
+- 37 automated regression tests pass, including four new response-format and diagnostic cases.
+- User diagnostics from v2.1.7 showed 36 unresolved previews and 23 failed detail jobs. They did not include failure reasons, so the cause in that authenticated session is not yet confirmed. Live verification remains required.
+
 ## [2.1.7] - 2026-09-10
 
 ### Fixed
