@@ -13,7 +13,7 @@
 // @compatible   brave
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
-// @version      2.1.6
+// @version      2.1.8
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -89,6 +89,10 @@
     nativeConsumed: new Map(),
     nativeStep: 0,
     mediaById: new Map(),
+    postGroups: new Map(),
+    detailJobs: new Map(),
+    detailPaused: false,
+    detailRequests: 0,
     stats: {
       images: 0,
       videos: 0,
@@ -169,7 +173,7 @@
         url,
         headers: options.headers || {},
         data: options.body instanceof URLSearchParams ? options.body.toString() : options.body,
-        responseType: 'json',
+        responseType: 'text',
         timeout: 30000,
         onload: response => {
           if (response.status < 200 || response.status >= 300) {
@@ -179,7 +183,7 @@
             return;
           }
           try {
-            const value = response.response ?? JSON.parse(response.responseText);
+            const value = decodeResponse(response.responseText ?? response.response);
             resolve(value);
           } catch (error) {
             reject(new Error(`Invalid JSON: ${error.message}`));
@@ -207,10 +211,10 @@
         error.status = response.status;
         throw error;
       }
-      return await response.json();
+      return decodeResponse(await response.text());
     } catch (error) {
       if (error?.name === 'AbortError') throw error;
-      if (error?.status) throw error;
+      if (error?.status || error?.responseFormat) throw error;
       return gmJson(url, options);
     }
   }
@@ -232,7 +236,8 @@
     };
   }
 
-  const VERSION = '2.1.6';
+  const VERSION = '2.1.8';
+  const POST_QUERY_ID = '27128499623469141';
   const native = {
     key: '', items: new Map(), scripts: new WeakSet(), sequence: 0,
     pageInfo: null, requests: 0, responses: 0, errors: [], hooks: [],
@@ -272,18 +277,214 @@
     return JSON.stringify(media);
   }
 
+  function postKey(media) {
+    return String(media?.code || media?.shortcode || media?.pk || media?.id || '');
+  }
+
+  function postShape(media) {
+    const children = [media?.carousel_media, media?.carousel_media_items,
+      media?.edge_sidecar_to_children?.edges?.map(edge => edge.node).filter(Boolean)]
+      .filter(items => Array.isArray(items) && items.length).sort((a, b) => b.length - a.length)[0] || [];
+    const expected = Number(media?.carousel_media_count || media?.carousel_count || media?.edge_sidecar_to_children?.count || 0);
+    const carousel = media?.media_type === 8 || /Sidecar/.test(media?.__typename || '') || expected > 1 || children.length > 1;
+    const hasSource = child => (isVideo(child) ? videoCandidates(child) : imageCandidates(child)).length > 0;
+    const complete = !media?.__preview && (carousel
+      ? children.length >= (expected || 2) && children.every(hasSource)
+      : hasSource(media));
+    return { children, expected, carousel, complete };
+  }
+
+  function mergePostMedia(previous, incoming) {
+    if (!previous) return incoming;
+    const before = postShape(previous), after = postShape(incoming);
+    if (before.complete && (incoming.__preview || (!after.complete && before.expected >= after.expected))) return previous;
+    const merged = { ...previous, ...incoming, __preview: Boolean(incoming.__preview),
+      user: incoming.user || incoming.owner || previous.user || previous.owner };
+    if (after.complete && (!before.expected || (after.children.length || 1) >= before.expected)) {
+      delete merged.carousel_media;
+      delete merged.carousel_media_items;
+      delete merged.edge_sidecar_to_children;
+      if (after.children.length) merged.carousel_media = after.children;
+      return merged;
+    }
+    const children = after.children.length >= before.children.length ? after.children : before.children;
+    delete merged.carousel_media_items;
+    delete merged.edge_sidecar_to_children;
+    if (children.length) merged.carousel_media = children;
+    if (before.carousel || after.carousel) merged.media_type = 8;
+    merged.carousel_media_count = Math.max(before.expected, after.expected);
+    return merged;
+  }
+
   function cacheMedia(media, route, source) {
     if (detectRoute().key !== route.key) return;
     const cache = routeCache(route);
-    const key = String(media.code || media.shortcode || media.pk || media.id || '');
+    const key = postKey(media);
     if (!key) return;
     const previous = cache.items.get(key);
-    if (previous && !previous.media.__preview && media.__preview) return;
+    media = mergePostMedia(previous?.media, media);
     const signature = mediaSignature(media);
     if (previous?.signature === signature) return;
     cache.items.set(key, { media, signature, source });
     cache.sequence += 1;
     if (cache.items.size > 600) cache.items.delete(cache.items.keys().next().value);
+    if (state.opened && state.routeKey === route.key && state.postGroups.has(key)) {
+      appendRawMedia([media]);
+      state.nativeConsumed.set(key, signature);
+      ui?.refresh();
+    }
+  }
+
+  function mediaIdForPost(media) {
+    const id = String(media.pk || media.id || '');
+    if (/^\d+(?:_\d+)?$/.test(id)) return id;
+    const code = media.code || media.shortcode || '';
+    if (!/^[A-Za-z0-9_-]{1,11}$/.test(code)) return '';
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    let value = 0n;
+    for (const character of code) value = value * 64n + BigInt(alphabet.indexOf(character));
+    return value > 0n ? String(value) : '';
+  }
+
+  function detailMedia(json, original) {
+    const code = original.code || original.shortcode;
+    const id = mediaIdForPost(original).split('_')[0];
+    const candidates = [];
+    const seen = new WeakSet();
+    let remaining = 24000;
+    function walk(media, depth = 0) {
+      if (!media || depth > 45 || --remaining < 0) return;
+      if (typeof media === 'string') {
+        if (/^[\[{]/.test(media.trim())) for (const value of parsePayload(media)) walk(value, depth + 1);
+        return;
+      }
+      if (typeof media !== 'object' || seen.has(media)) return;
+      seen.add(media);
+      const returnedCode = media.code || media.shortcode;
+      const matches = code && returnedCode ? returnedCode === code
+        : id && String(media.pk || media.id || '').split('_')[0] === id;
+      if (matches && isMediaNode(media)) candidates.push(media);
+      for (const child of Object.values(media)) walk(child, depth + 1);
+    }
+    walk(json);
+    return candidates.sort((a, b) => Number(postShape(b).complete) - Number(postShape(a).complete)
+      || postShape(b).children.length - postShape(a).children.length)[0];
+  }
+
+  async function requestPostJson(url, options, signal) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(abort, 15000);
+    try { return await requestJson(url, { ...options, signal: controller.signal }); }
+    catch (error) {
+      if (error?.status) recordNativeFailure(new URL(url), error.status);
+      if (error?.name === 'AbortError' && !signal.aborted) throw new Error('Post details timed out');
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+    }
+  }
+
+  async function resolvePostDetails(original, generation, route, signal) {
+    const key = postKey(original);
+    const code = original.code || original.shortcode;
+    const requests = [];
+    if (code) {
+      const body = new URLSearchParams({ doc_id: POST_QUERY_ID, server_timestamps: 'true',
+        variables: JSON.stringify({ shortcode: code, __relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider: false }) });
+      requests.push({ url: new URL('/graphql/query', location.origin).href,
+        options: { method: 'POST', body, headers: { ...headers(), 'Content-Type': 'application/x-www-form-urlencoded', 'X-FB-Friendly-Name': 'PolarisPostRootQuery' } } });
+    }
+    const id = mediaIdForPost(original);
+    if (id) requests.push({ url: new URL(`/api/v1/media/${encodeURIComponent(id)}/info/`, location.origin).href, options: { headers: headers() } });
+    let failure = new Error('Instagram did not return every slide in this post');
+    const attempts = [];
+    for (const request of requests) {
+      checkSession(generation, route, signal);
+      const cached = native.items.get(key)?.media;
+      if (cached && postShape(cached).complete) return cached;
+      if (state.detailPaused) throw new Error('Post loading paused by Instagram');
+      try {
+        state.detailRequests += 1;
+        const json = await requestPostJson(request.url, request.options, signal);
+        checkSession(generation, route, signal);
+        if (json?.status === 'fail') {
+          const error = new Error(json.message || 'Instagram rejected the post request');
+          if (/login_required|challenge_required|checkpoint_required/i.test(error.message)) error.status = 401;
+          if (/rate.limit|please wait|few minutes|throttl/i.test(error.message)) error.status = 429;
+          throw error;
+        }
+        const media = detailMedia(json, original);
+        if (!media) {
+          const envelopes = Array.isArray(json) ? json : [json];
+          const errors = envelopes.flatMap(value => Array.isArray(value?.errors) ? value.errors : []);
+          const codes = errors.map(error => error.code || error.extensions?.code).filter(Boolean).map(String).filter(value => /^[\w-]{1,60}$/.test(value));
+          throw new Error(errors.length ? `GraphQL returned ${errors.length} error(s)${codes.length ? ` (${codes.join(', ')})` : ''}` : 'Response contained no matching post');
+        }
+        const owner = media.user?.username || media.owner?.username;
+        if (route.mode === 'profile' && owner && owner.toLowerCase() !== route.username.toLowerCase()) throw new Error('Post owner did not match the profile');
+        cacheMedia({ ...media, code: code || media.code, __preview: false }, route, 'post details');
+        const result = native.items.get(key)?.media;
+        if (result && postShape(result).complete) return result;
+        throw new Error('Matching post is missing full slide sources');
+      } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        failure = error;
+        const endpoint = request.options.method === 'POST' ? 'graphql' : 'media-info';
+        attempts.push(`${endpoint}: ${error.message || String(error)}`);
+        if ([401, 403, 429].includes(error?.status)) {
+          state.detailPaused = true;
+          throw error;
+        }
+      }
+    }
+    failure.message = attempts.join('; ') || failure.message;
+    throw failure;
+  }
+
+  async function expandPosts(items, generation, route, signal) {
+    const jobs = state.detailJobs;
+    const pending = items.filter(media => !postShape(media).complete && !isAd(media));
+    let next = 0;
+    async function worker() {
+      while (next < pending.length && !state.detailPaused) {
+        checkSession(generation, route, signal);
+        const original = pending[next++], key = postKey(original);
+        if (state.postGroups.get(key)?.complete) continue;
+        let job = jobs.get(key);
+        if (!job) {
+          job = { status: 'loading', promise: null };
+          jobs.set(key, job);
+          job.promise = resolvePostDetails(original, generation, route, signal).then(() => { job.status = 'done'; }).catch(error => {
+            if (signal.aborted || error?.name === 'AbortError') {
+              jobs.delete(key);
+              throw error;
+            }
+            job.status = 'failed';
+            job.error = error.message || String(error);
+          });
+        }
+        ui?.refresh();
+        await job.promise;
+        checkSession(generation, route, signal);
+        ui?.refresh();
+      }
+    }
+    await Promise.all([worker(), worker()]);
+  }
+
+  function incompletePosts() {
+    return [...state.postGroups.values()].filter(group => !group.complete);
+  }
+
+  async function retryIncompletePosts() {
+    if (state.loading || !state.opened) return;
+    state.detailJobs.clear();
+    state.detailPaused = false;
+    await loadNextPage(true);
   }
 
   function parsePayload(text) {
@@ -295,6 +496,15 @@
       try { values.push(JSON.parse(line)); } catch (_) {}
     }
     return values;
+  }
+
+  function decodeResponse(value) {
+    if (value && typeof value === 'object') return value;
+    const values = parsePayload(value);
+    if (values.length) return values.length === 1 ? values[0] : values;
+    const error = new Error(/^\s*</.test(value || '') ? 'Instagram returned HTML instead of post data' : 'Instagram returned an unreadable data response');
+    error.responseFormat = true;
+    throw error;
   }
 
   function ingestPayload(value, route, source = 'network') {
@@ -525,6 +735,10 @@
       pagesLoaded: state.pagesLoaded, moreKnown: native.pageInfo?.more ?? null,
       recentHttpErrors: native.errors, failedMedia: state.stats.failures,
       previewMedia: state.media.filter(item => item.preview).length,
+      incompletePosts: incompletePosts().length, postDetailRequests: state.detailRequests,
+      postDetailFailures: [...state.detailJobs.values()].filter(job => job.status === 'failed').length,
+      postDetailsPaused: state.detailPaused,
+      postDetailErrors: [...new Set([...state.detailJobs.values()].filter(job => job.status === 'failed').map(job => job.error))].slice(-8),
     }, null, 2);
   }
 
@@ -540,6 +754,10 @@
     state.autoPaused = false;
     state.starting = false;
     state.mediaById = new Map();
+    state.postGroups = new Map();
+    state.detailJobs = new Map();
+    state.detailPaused = false;
+    state.detailRequests = 0;
     refreshRequests.clear();
     routeCache(route);
     state.nextCursor = null;
@@ -600,9 +818,9 @@
     return { items, cursor: cursor ? String(cursor) : null, more: Boolean(more && cursor) };
   }
 
-  async function loadNextPage() {
-    if (state.loading || state.exhausted || !state.opened) return { added: 0, busy: state.loading };
-    if (state.settings.maxPages > 0 && state.pagesLoaded >= state.settings.maxPages) {
+  async function loadNextPage(detailsOnly = false) {
+    if (state.loading || (!detailsOnly && state.exhausted) || !state.opened) return { added: 0, busy: state.loading };
+    if (!detailsOnly && state.settings.maxPages > 0 && state.pagesLoaded >= state.settings.maxPages) {
       state.exhausted = true;
       state.hasMore = false;
       ui.setStatus(`Stopped at the ${state.settings.maxPages}-page limit.`);
@@ -618,12 +836,15 @@
     ui.setStatus(state.pagesLoaded ? 'Loading more media…' : 'Reading Instagram media…');
     ui.refresh();
     try {
-      const json = await fetchPage(state.nextCursor, state.controller.signal);
+      const json = detailsOnly ? { items: incompletePosts().map(group => group.media),
+        more_available: state.hasMore, next_max_id: state.nextCursor } : await fetchPage(state.nextCursor, state.controller.signal);
       checkSession(generation, route, state.controller.signal);
       const before = state.media.length;
       appendRawMedia(json.items);
+      await expandPosts(json.items, generation, route, state.controller.signal);
+      checkSession(generation, route, state.controller.signal);
       const added = state.media.length - before;
-      if (json.items.length) state.pagesLoaded += 1;
+      if (json.items.length && !detailsOnly) state.pagesLoaded += 1;
       state.nextCursor = json.next_max_id;
       state.hasMore = json.more_available;
       state.exhausted = !state.hasMore;
@@ -631,7 +852,8 @@
       if (json.__waiting) {
         ui.setStatus('Instagram has not returned more posts. Close the gallery to check the page, then reopen or press Load more.');
       } else {
-        ui.setStatus(`${added ? `Loaded ${added} new media items` : 'Updated loaded media'}${state.exhausted ? ' — end reached.' : '.'}${json.__preview ? ' Visible-page previews are shown until full-size data arrives.' : ''}`);
+        const missing = incompletePosts().length;
+        ui.setStatus(`${added ? `Loaded ${added} new media items` : 'Updated loaded media'}${state.exhausted && !missing ? ' — end reached.' : '.'}${missing ? ` ${missing} posts incomplete; use Retry incomplete posts.` : ''}`);
       }
       ui.refresh();
       return { added, waiting: json.__waiting };
@@ -722,88 +944,78 @@
   }
 
   function appendRawMedia(rawItems) {
-    const fragment = doc.createDocumentFragment();
-
-    for (const parent of rawItems || []) {
-      if (!parent) continue;
-      if (isAd(parent)) {
-        state.stats.ads += 1;
-        continue;
-      }
-
+    const selectedId = state.media[state.lightboxIndex]?.id;
+    const oldEntries = state.media.slice();
+    for (const raw of rawItems || []) {
+      if (!raw || isAd(raw)) continue;
+      const key = postKey(raw);
+      if (!key) continue;
+      const previousGroup = state.postGroups.get(key);
+      const parent = mergePostMedia(previousGroup?.media, raw);
+      const shape = postShape(parent);
+      const children = shape.children.length ? shape.children : [parent];
       const shortcode = parent.shortcode || parent.code || '';
-      const username = parent?.user?.username || parent?.owner?.username || state.username;
+      const username = parent.user?.username || parent.owner?.username || state.username;
       const caption = captionOf(parent);
-      const children = parent?.edge_sidecar_to_children?.edges?.map(edge => edge.node).filter(Boolean)
-        || parent?.carousel_media
-        || parent?.carousel_media_items
-        || [parent];
-
-      if (children.length > 1) state.stats.carousels += 1;
-
+      const entries = [];
       children.forEach((child, index) => {
         if (!child || isAd(child)) return;
         const type = isVideo(child) ? 'video' : 'image';
         const sources = type === 'video' ? videoCandidates(child) : imageCandidates(child);
-        if (!sources.length) {
-          state.stats.failures += 1;
-          return;
-        }
-
-        const stableId = String(shortcode ? `${shortcode}:${index}` : (child.pk || child.id || sources[0].url));
-        if (state.seenMedia.has(stableId)) {
-          const previous = state.mediaById.get(stableId);
-          if (previous && (!parent.__preview || previous.preview)) {
-            const changed = JSON.stringify(previous.sources) !== JSON.stringify(sources);
-            previous.preview = Boolean(parent.__preview);
-            previous.mediaId = String(child.pk || child.id || previous.mediaId || '');
-            previous.postId = String(parent.pk || parent.id || previous.postId || '');
-            if (changed) {
-              previous.sources = sources;
-              previous.mediaUrl = sources[0].url;
-              previous.sourceIndex = 0;
-              const element = previous.card?.querySelector('img, video');
-              if (element) setSourceWithFallback(element, previous);
-            }
-          }
-          state.stats.duplicates += 1;
-          return;
-        }
-        state.seenMedia.add(stableId);
-
+        if (!sources.length) return;
+        const stableId = `${key}:${index}`;
+        let entry = state.mediaById.get(stableId);
+        const previousType = entry?.type;
+        const changed = entry && JSON.stringify(entry.sources) !== JSON.stringify(sources);
+        if (!entry) entry = { id: stableId, downloadState: 'idle', sourceIndex: 0 };
         const posterSources = type === 'video' ? imageCandidates(child).concat(imageCandidates(parent)) : [];
-        const entry = {
-          id: stableId,
-          preview: Boolean(parent.__preview),
-          mediaId: String(child.pk || child.id || ''),
-          postId: String(parent.pk || parent.id || ''),
-          type,
-          sources,
-          sourceIndex: 0,
-          mediaUrl: sources[0].url,
-          posterUrl: posterSources[0]?.url || '',
+        Object.assign(entry, {
+          postKey: key, postComplete: shape.complete, preview: Boolean(parent.__preview),
+          mediaId: String(child.pk || child.id || ''), postId: String(parent.pk || parent.id || ''),
+          type, sources, mediaUrl: !changed && entry.mediaUrl ? entry.mediaUrl : sources[0].url,
+          posterUrl: posterSources[0]?.url || '', shortcode, username, caption,
           postUrl: shortcode ? `https://www.instagram.com/p/${shortcode}/` : location.href,
-          shortcode,
-          username,
-          caption,
-          carouselIndex: index,
-          carouselTotal: children.length,
-          width: sources[0].width || Number(child?.original_width || child?.width || child?.dimensions?.width || 0),
-          height: sources[0].height || Number(child?.original_height || child?.height || child?.dimensions?.height || 0),
-          downloadState: 'idle',
-        };
-
-        const mediaIndex = state.media.length;
-        state.media.push(entry);
-        entry.card = ui.createCard(entry, mediaIndex);
+          carouselIndex: index, carouselTotal: shape.expected || (shape.complete ? children.length : 0),
+          width: sources[0].width || Number(child.original_width || child.width || child.dimensions?.width || 0),
+          height: sources[0].height || Number(child.original_height || child.height || child.dimensions?.height || 0),
+        });
+        if (!entry.card || previousType !== type) {
+          const oldCard = entry.card;
+          if (oldCard) {
+            mediaBindings.get(oldCard.querySelector('img, video'))?.();
+            oldCard.remove();
+          }
+          entry.card = ui.createCard(entry, 0);
+        } else {
+          if (changed) setSourceWithFallback(entry.card.querySelector('img, video'), entry);
+          const image = entry.card.querySelector('img');
+          if (image) image.alt = caption.slice(0, 160) || 'Instagram image';
+          entry.card.querySelector('.caption').textContent = caption;
+        }
         state.mediaById.set(stableId, entry);
-        fragment.appendChild(entry.card);
-        if (type === 'video') state.stats.videos += 1;
-        else state.stats.images += 1;
+        entries.push(entry);
       });
+      state.postGroups.set(key, { media: parent, entries, complete: shape.complete, carousel: shape.carousel });
     }
-
-    ui.gallery.appendChild(fragment);
+    state.media = [...state.postGroups.values()].flatMap(group => group.entries);
+    const keep = new Set(state.media);
+    for (const entry of oldEntries) if (!keep.has(entry)) {
+      mediaBindings.get(entry.card?.querySelector('img, video'))?.();
+      entry.card?.remove();
+    }
+    state.mediaById = new Map(state.media.map(entry => [entry.id, entry]));
+    state.seenMedia = new Set(state.mediaById.keys());
+    let cursor = ui.gallery.firstChild;
+    state.media.forEach((entry, index) => {
+      entry.card.dataset.index = String(index);
+      if (entry.card !== cursor) ui.gallery.insertBefore(entry.card, cursor);
+      cursor = entry.card.nextSibling;
+    });
+    state.stats.images = state.media.filter(entry => entry.type === 'image').length;
+    state.stats.videos = state.media.length - state.stats.images;
+    state.stats.carousels = [...state.postGroups.values()].filter(group => group.carousel).length;
+    ui.syncViewer(selectedId);
+    ui.refresh();
   }
 
   async function refreshedSources(entry, signal) {
@@ -811,8 +1023,7 @@
     const cached = routeCache(route).items.get(entry.shortcode)?.media;
     function sourcesOf(parent) {
       if (!parent) return [];
-      const children = parent.carousel_media || parent.carousel_media_items
-        || parent.edge_sidecar_to_children?.edges?.map(edge => edge.node) || [parent];
+      const children = postShape(parent).children.length ? postShape(parent).children : [parent];
       const child = children.find(item => entry.mediaId && String(item.pk || item.id) === entry.mediaId)
         || children[entry.carouselIndex];
       return entry.type === 'video' ? videoCandidates(child) : imageCandidates(child);
@@ -983,6 +1194,11 @@
     const tried = new Set();
     let failure;
     try {
+      if (!entry.postComplete) {
+        const job = state.detailJobs.get(entry.postKey);
+        if (job?.status === 'loading') await job.promise;
+        if (!entry.postComplete) throw new Error('The full post is still unavailable; retry incomplete posts first');
+      }
       let candidates = [{ url: entry.mediaUrl }, ...entry.sources];
       for (let pass = 0; pass < 2; pass += 1) {
         for (const candidate of candidates) {
@@ -1026,9 +1242,10 @@
       await new Promise(resolve => setTimeout(resolve, 450));
     }
 
-    const completed = state.loadAll && state.exhausted;
+    const missing = incompletePosts().length;
+    const completed = state.loadAll && state.exhausted && !missing;
     state.loadAll = false;
-    ui.toast(completed ? `Load all complete: ${state.media.length} media items.` : 'Load all stopped.', completed ? 'success' : 'warning', 4000);
+    ui.toast(completed ? `Load all complete: ${state.media.length} media items.` : missing ? `Loaded ${state.media.length} media; ${missing} posts are incomplete.` : 'Load all stopped.', completed ? 'success' : 'warning', 4000);
     ui.refresh();
   }
 
@@ -1074,6 +1291,7 @@
             <button data-action="autoload">Auto: On</button>
             <button data-action="load">Load more</button>
             <button data-action="load-all">Load all</button>
+            <button data-action="retry-posts" class="hidden">Retry incomplete posts</button>
             <button data-action="export">Export URLs</button>
             <button data-action="diagnostics">Copy diagnostics</button>
             <button data-action="settings">Settings</button>
@@ -1180,6 +1398,8 @@
       if (route.key !== state.routeKey || (!state.media.length && !state.starting)) {
         resetSession(route);
         startSession();
+      } else if (incompletePosts().some(group => !state.detailJobs.has(postKey(group.media)))) {
+        loadNextPage(true);
       } else if (state.autoPaused || pendingNativeItems().length) {
         loadNextPage();
       }
@@ -1227,9 +1447,18 @@
     }
 
     function refresh() {
+      const missing = incompletePosts().length;
       $('.mode').textContent = state.mode;
       $('.count').textContent = `${state.media.length} media`;
-      $('.stats').textContent = `Pages ${state.pagesLoaded} • Images ${state.stats.images} • Videos ${state.stats.videos} • Carousels ${state.stats.carousels} • Duplicates ${state.stats.duplicates}`;
+      $('.stats').textContent = `Pages ${state.pagesLoaded} • Images ${state.stats.images} • Videos ${state.stats.videos} • Carousels ${state.stats.carousels}${missing ? ` • ${missing} posts ${state.loading && !state.detailPaused ? 'loading' : 'incomplete'}` : ''}`;
+      const retry = $('[data-action="retry-posts"]');
+      retry.classList.toggle('hidden', !missing);
+      retry.disabled = state.loading;
+      for (const entry of state.media) {
+        const slide = entry.carouselTotal > 1 ? `  ${entry.carouselIndex + 1}/${entry.carouselTotal}` : '';
+        const status = entry.postComplete ? '' : state.loading && !state.detailPaused ? ' — loading full post…' : ' — post incomplete';
+        entry.card.querySelector('.card-line').textContent = `${entry.type.toUpperCase()}${entry.username ? `  @${entry.username}` : ''}${slide}${status}`;
+      }
       const load = $('[data-action="load"]');
       load.disabled = state.loading || state.exhausted;
       load.textContent = state.loading ? 'Loading…' : state.exhausted ? 'No more' : 'Load more';
@@ -1285,10 +1514,10 @@
 
       card.addEventListener('click', event => {
         if (event.target.closest('button, video')) return;
-        openViewer(index);
+        openViewer(Number(card.dataset.index));
       });
       card.addEventListener('keydown', event => {
-        if (event.key === 'Enter') openViewer(index);
+        if (event.key === 'Enter') openViewer(Number(card.dataset.index));
       });
       return card;
     }
@@ -1397,10 +1626,22 @@
       resetGesture();
     }
 
+    function syncViewer(selectedId) {
+      if (!selectedId || state.lightboxIndex < 0) return;
+      const index = state.media.findIndex(entry => entry.id === selectedId);
+      if (index < 0) { closeViewer(); return; }
+      state.lightboxIndex = index;
+      const entry = state.media[index];
+      const element = viewerMedia.querySelector('img, video');
+      if (!element || (element.tagName === 'VIDEO') !== (entry.type === 'video')) openViewer(index);
+      else if (element.src !== entry.mediaUrl) setSourceWithFallback(element, entry);
+      updateViewerMeta();
+    }
+
     function updateViewerMeta(extra = '') {
       const entry = currentEntry();
       if (!entry) return;
-      const more = state.hasMore ? 'More available' : state.exhausted ? 'End reached' : 'Loaded';
+      const more = !entry.postComplete ? 'Post still incomplete' : incompletePosts().length ? 'Some posts incomplete' : state.hasMore ? 'More available' : state.exhausted ? 'End reached' : 'Loaded';
       const carousel = entry.carouselTotal > 1 ? ` • Post carousel ${entry.carouselIndex + 1}/${entry.carouselTotal}` : '';
       const resolution = entry.width && entry.height ? ` • ${entry.width}×${entry.height}` : '';
       viewerKicker.textContent = `Gallery ${state.lightboxIndex + 1}/${state.media.length} loaded • ${more}${carousel}${resolution}`;
@@ -1411,16 +1652,36 @@
 
     async function moveViewer(delta) {
       if (state.lightboxIndex < 0 || !state.media.length) return;
+      const selectedId = currentEntry().id;
+      const generation = state.generation;
+      const group = state.postGroups.get(currentEntry().postKey);
+      if (delta > 0 && !group?.complete) {
+        const job = state.detailJobs.get(currentEntry().postKey);
+        if (job?.status === 'loading') {
+          updateViewerMeta('Loading the remaining slides…');
+          try { await job.promise; } catch (_) { return; }
+          if (generation !== state.generation || currentEntry()?.id !== selectedId || !state.opened) return;
+        }
+        const currentGroup = state.postGroups.get(currentEntry().postKey);
+        if (!currentGroup.complete && currentGroup.entries.at(-1)?.id === selectedId) {
+          updateViewerMeta(state.loading ? 'Loading the remaining slides…' : 'This post is incomplete. Use Retry incomplete posts in the gallery.');
+          return;
+        }
+      }
       if (delta > 0 && state.lightboxIndex === state.media.length - 1) {
         if (state.hasMore && !state.exhausted) {
-          const previousLength = state.media.length;
           updateViewerMeta('Loading more media…');
           const result = await loadNextPage();
-          if (state.media.length > previousLength) {
-            openViewer(previousLength);
+          if (generation !== state.generation || currentEntry()?.id !== selectedId || !state.opened) return;
+          if (state.lightboxIndex + 1 < state.media.length) {
+            openViewer(state.lightboxIndex + 1);
             return;
           }
           if (result?.error || result?.waiting || result?.busy || result?.aborted || result?.stale) return;
+        }
+        if (incompletePosts().length) {
+          updateViewerMeta('Some posts are incomplete. Use Retry incomplete posts in the gallery.');
+          return;
         }
         openViewer(0);
         toast('Reached the end and returned to the first item.', 'info');
@@ -1469,6 +1730,7 @@
       }
       if (action === 'load') loadNextPage();
       if (action === 'load-all') toggleLoadAll();
+      if (action === 'retry-posts') retryIncompletePosts();
       if (action === 'export') exportUrls();
       if (action === 'diagnostics') copyText(diagnosticReport(), 'Diagnostics copied.');
       if (action === 'settings') $('.settings').classList.toggle('hidden');
@@ -1614,7 +1876,7 @@
     applySettings();
 
     return {
-      root, gallery, open, close, setStatus, toast, clearGallery, refresh, createCard, applySettings,
+      root, gallery, open, close, setStatus, toast, clearGallery, refresh, createCard, applySettings, syncViewer,
     };
   }
 

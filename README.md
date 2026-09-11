@@ -28,6 +28,7 @@ The result is closer to a real photo gallery than Instagram's native profile vie
 
 - Uncropped portrait and landscape media
 - Full-size image and video wall
+- Automatic expansion of carousel posts into separate, adjacent photo/video items
 - Fit grid, masonry, classic wall, and contact-sheet layouts
 - Full-frame or cropped contact-sheet thumbnails
 - Medium, large, and huge gallery sizing
@@ -146,9 +147,9 @@ The distributed userscript is readable source code and has no remote `@require` 
 | `GM_registerMenuCommand` | Provide userscript-manager shortcuts |
 | `GM_setClipboard` | Copy post/media URLs |
 | `GM_download` | Download images and videos directly |
-| `GM_xmlhttpRequest` | Retrieve media blobs when manager downloads fail; fallback transport for a bounded expired-media refresh |
+| `GM_xmlhttpRequest` | Retrieve media blobs when manager downloads fail; fallback transport for post details and expired-media refresh |
 | `unsafeWindow` | Observe Instagram's native media responses and scroll the page to load more posts |
-| `@connect instagram.com` / `www.instagram.com` / `i.instagram.com` | Refresh an expired media URL once when fresh page data is unavailable |
+| `@connect instagram.com` / `www.instagram.com` / `i.instagram.com` | Retrieve complete post media, including missing carousel slides, and refresh expired URLs |
 | `@connect *.cdninstagram.com` / `*.fbcdn.net` | Media retrieval/download fallbacks |
 
 There is **no analytics, ad network, external telemetry, remote configuration, or user tracking** in the script.
@@ -169,7 +170,7 @@ Common symptoms:
 - **A download fails:** the script tries available media URLs, a blob download, and one expired-media refresh. It reports failure if these fail; opening a remote URL does not count as a successful download.
 - **HTTP 404 during gallery loading:** v2.1.6 reads Instagram's own page data and native responses, without requesting the old profile/feed REST routes. Use **Copy diagnostics** to include the script version and failed endpoint/status in a report.
 - **Waiting for more posts:** the gallery has paused because Instagram did not return more media. Close the gallery, check that Instagram itself loads the posts, then reopen or press **Load more**. A timeout does not count as the end of the feed.
-- **Only previews appear:** visible-page thumbnails are available before full media data. Fresh native responses upgrade these items when the gallery consumes the next batch.
+- **Only a cover appears:** v2.1.8 automatically requests complete post details and expands every available slide. If Instagram rejects that request, the post is labeled incomplete; use **Retry incomplete posts**. The script does not count an unresolved cover as a complete carousel. If retry fails, copy diagnostics and include `postDetailErrors`; these distinguish HTML responses, GraphQL errors, and missing matching post data.
 
 Use the [bug-report template](https://github.com/stupidgiraffe/instagram-full-size-gallery-downloader/issues/new/choose) for reproducible regressions.
 
@@ -187,6 +188,8 @@ npm test
 Before changing loader, pagination, media sizing, or viewer geometry, map the complete behavior on both sides of the change and run the manual checklist in [`docs/TESTING.md`](docs/TESTING.md).
 
 The automated tests use controlled page and network fixtures. They do not replace checks in a logged-in Instagram session or verification of the Greasy Fork-installed copy.
+
+Post resolution uses `PolarisPostRootQuery` (`doc_id=27128499623469141`) and the `xdt_api__v1__media__shortcode__web_info.items` response, checked against [Instaloader's current post metadata implementation](https://github.com/instaloader/instaloader/blob/master/instaloader/structures.py) on 2026-09-10. There is one media-info fallback. These private Instagram contracts may change; a successful HTTP response alone does not prove that all declared carousel children were returned.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CHANGELOG.md`](CHANGELOG.md), and [`NOTICE.md`](NOTICE.md) for project history and contribution expectations.
 

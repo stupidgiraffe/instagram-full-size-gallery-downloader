@@ -6,6 +6,10 @@ Disable every older copy of the userscript before testing. Test the exact file/v
 
 - Open a profile and launch IG Gallery.
 - Confirm the current profile’s media loads—not media from the previously visited profile.
+- Start from a profile grid showing only a carousel cover. Without opening that post in Instagram first, verify a six-photo post produces six separate gallery cards and six distinct downloadable images.
+- Repeat with a mixed photo/video carousel; verify media type, original slide order, and `1/6` through `6/6` labels.
+- Keep a later post open in the viewer while an earlier carousel expands. Verify the selected media stays selected and its arrows/card links still select the correct items.
+- At the end of the post list, confirm missing slides are still resolved and incomplete posts remain clearly marked with a working retry control.
 - Confirm portrait and landscape photos show their complete frame.
 - Test Fit, Masonry, Classic, and Contact layouts.
 - Test full-frame and cropped contact thumbnails.
@@ -80,3 +84,7 @@ npm test
 ```
 
 Then install the release source through the same channel users will use (especially Greasy Fork), disable local development copies, and repeat the high-risk viewer, pagination, and download checks above.
+
+### Response formats (2.1.8)
+
+Automated fixtures cover prefixed JSON, newline-delimited nested post data, manager text responses, and HTML/GraphQL failure diagnostics. These fixtures verify parser behavior, not whether Instagram accepts requests in a particular logged-in session. On a live failure, include `postDetailErrors` from copied diagnostics.

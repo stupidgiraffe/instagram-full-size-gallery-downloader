@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.8] - 2026-09-10
+
+### Fixed
+
+- Decode prefixed and newline-delimited JSON in active post requests and the userscript-manager transport, matching formats already supported by passive capture.
+- Find the matching post inside nested response envelopes and prefer its complete carousel over a summary in the same response.
+- Avoid retrying a successful HTTP response through a second transport solely because its body is HTML or unreadable.
+- Include distinct post-detail failure reasons and endpoint names in copied diagnostics; report GraphQL error counts/codes without dumping response bodies.
+
+### Validation
+
+- 37 automated regression tests pass, including four new response-format and diagnostic cases.
+- User diagnostics from v2.1.7 showed 36 unresolved previews and 23 failed detail jobs. They did not include failure reasons, so the cause in that authenticated session is not yet confirmed. Live verification remains required.
+
+## [2.1.7] - 2026-09-10
+
+### Fixed
+
+- Automatically request full post details for visible covers and incomplete carousel records. A six-slide post now expands into six individual gallery items without opening the Instagram post first.
+- Use the current post-detail GraphQL response and one media-info fallback; cap concurrent lookups at two, cancel closed/stale sessions, and pause queued lookups on authentication or rate-limit responses.
+- Keep every post's slides adjacent in their original order even when detail responses arrive out of order. Preserve viewer selection and update card navigation indices after expansion.
+- Upgrade cover images to the correct photo/video type, carousel position, full-size source, and download filename. Downloads requested while a cover is resolving wait for the complete item.
+- Apply late complete metadata even after the post list is exhausted; preserve complete carousels when later summaries contain fewer slides.
+- Show incomplete-post status and an explicit retry control instead of silently treating one cover as a complete carousel. Do not report Load all complete while posts remain incomplete.
+
+### Validation
+
+- Reproduced both cover-only and partial-carousel failures against v2.1.6: one item rendered instead of six.
+- Added regression cases for automatic six-slide resolution, mixed media, ordering, viewer selection/navigation, individual downloads, detail fallback, cancellation, retry, and rate-limit handling.
+- Live authenticated verification of this new retrieval path remains pending. The earlier v2.1.6 confirmation did not cover carousel completeness.
+
 ## [2.1.6] - 2026-09-09
 
 ### Fixed
