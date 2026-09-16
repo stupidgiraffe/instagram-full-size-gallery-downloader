@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.9] - 2026-09-16
+
+### Fixed
+
+- Accept exact post-detail identity matches even when the primary author differs from the profile (including collaborative posts). Continue rejecting mismatched post codes.
+- Use visible profile-grid membership to recognize collaborative posts in page data; re-read boot data when new grid identities become available.
+- Verify carousel summaries with an unknown slide count instead of assuming two available slides are complete. Preserve richer partial metadata when rescanning cover thumbnails.
+- Retry temporary HTML, network, timeout, server, and incomplete-source failures for up to three rounds, with 1- and 4-second delays. Keep concurrency at two and cancel retries when closing or changing routes. Authentication/rate-limit responses still pause loading.
+- Start new profile sessions from the top and scan by viewport instead of jumping directly to the bottom, including when an earlier response already reported the feed end.
+- Check all known incomplete groups while loading and retry unresolved groups when reopening the gallery.
+
+### Validation
+
+- 43 automated tests pass, including the reported HTML/different-author fallback, collaborative boot data, unknown slide counts, automatic recovery, cancellation during backoff, and bottom-of-profile startup.
+- Authenticated live verification remains pending. Unavailable media stays marked incomplete; retry limits are not a guarantee that Instagram will return every item.
+
 ## [2.1.8] - 2026-09-10
 
 ### Fixed
