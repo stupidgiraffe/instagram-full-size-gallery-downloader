@@ -88,3 +88,10 @@ Then install the release source through the same channel users will use (especia
 ### Response formats (2.1.8)
 
 Automated fixtures cover prefixed JSON, newline-delimited nested post data, manager text responses, and HTML/GraphQL failure diagnostics. These fixtures verify parser behavior, not whether Instagram accepts requests in a particular logged-in session. On a live failure, include `postDetailErrors` from copied diagnostics.
+
+### Recovery and profile startup (2.1.9)
+
+- From the middle and bottom of a profile, open the gallery and load through the end. Check posts above the original scroll position as well as every carousel slide.
+- Verify a collaborative post whose primary author differs from the profile, including when GraphQL fails and media-info succeeds.
+- Confirm transient failures retry automatically; closing or navigating cancels backoff. Persistent unavailable posts remain visibly incomplete.
+- Automated tests cover these scenarios with fixtures; authenticated Instagram verification is still required.

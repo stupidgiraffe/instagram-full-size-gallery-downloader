@@ -13,7 +13,7 @@
 // @compatible   brave
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
-// @version      2.1.8
+// @version      2.1.9
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -236,10 +236,10 @@
     };
   }
 
-  const VERSION = '2.1.8';
+  const VERSION = '2.1.9';
   const POST_QUERY_ID = '27128499623469141';
   const native = {
-    key: '', items: new Map(), scripts: new WeakSet(), sequence: 0,
+    key: '', items: new Map(), profileCodes: new Set(), scripts: new WeakSet(), sequence: 0,
     pageInfo: null, requests: 0, responses: 0, errors: [], hooks: [],
   };
   const originalFetch = typeof win.fetch === 'function' ? win.fetch.bind(win) : null;
@@ -250,6 +250,7 @@
     if (native.key !== route.key) {
       native.key = route.key;
       native.items.clear();
+      native.profileCodes.clear();
       native.scripts = new WeakSet();
       native.pageInfo = null;
       native.sequence = 0;
@@ -261,7 +262,8 @@
     if (!media || typeof media !== 'object') return false;
     const code = media.code || media.shortcode;
     const owner = media.user || media.owner;
-    if (route.mode === 'profile') return String(owner?.username || '').toLowerCase() === route.username.toLowerCase();
+    if (route.mode === 'profile') return String(owner?.username || '').toLowerCase() === route.username.toLowerCase()
+      || native.profileCodes.has(String(code || ''));
     if (route.mode === 'post') return code === location.pathname.match(/^\/(?:p|reel|tv)\/([^/?#]+)/)?.[1];
     return route.mode === 'home' || route.mode === 'tagged';
   }
@@ -289,13 +291,14 @@
     const carousel = media?.media_type === 8 || /Sidecar/.test(media?.__typename || '') || expected > 1 || children.length > 1;
     const hasSource = child => (isVideo(child) ? videoCandidates(child) : imageCandidates(child)).length > 0;
     const complete = !media?.__preview && (carousel
-      ? children.length >= (expected || 2) && children.every(hasSource)
+      ? (expected > 0 || media.__fullDetails === true) && children.length >= (expected || 2) && children.every(hasSource)
       : hasSource(media));
     return { children, expected, carousel, complete };
   }
 
   function mergePostMedia(previous, incoming) {
     if (!previous) return incoming;
+    if (incoming.__preview && !previous.__preview) return previous;
     const before = postShape(previous), after = postShape(incoming);
     if (before.complete && (incoming.__preview || (!after.complete && before.expected >= after.expected))) return previous;
     const merged = { ...previous, ...incoming, __preview: Boolean(incoming.__preview),
@@ -367,8 +370,8 @@
       for (const child of Object.values(media)) walk(child, depth + 1);
     }
     walk(json);
-    return candidates.sort((a, b) => Number(postShape(b).complete) - Number(postShape(a).complete)
-      || postShape(b).children.length - postShape(a).children.length)[0];
+    return candidates.sort((a, b) => postShape(b).children.length - postShape(a).children.length
+      || Number(postShape(b).complete) - Number(postShape(a).complete))[0];
   }
 
   async function requestPostJson(url, options, signal) {
@@ -388,7 +391,7 @@
     }
   }
 
-  async function resolvePostDetails(original, generation, route, signal) {
+  async function resolvePostDetailsAttempt(original, generation, route, signal) {
     const key = postKey(original);
     const code = original.code || original.shortcode;
     const requests = [];
@@ -402,6 +405,7 @@
     if (id) requests.push({ url: new URL(`/api/v1/media/${encodeURIComponent(id)}/info/`, location.origin).href, options: { headers: headers() } });
     let failure = new Error('Instagram did not return every slide in this post');
     const attempts = [];
+    let retryable = false;
     for (const request of requests) {
       checkSession(generation, route, signal);
       const cached = native.items.get(key)?.media;
@@ -424,15 +428,17 @@
           const codes = errors.map(error => error.code || error.extensions?.code).filter(Boolean).map(String).filter(value => /^[\w-]{1,60}$/.test(value));
           throw new Error(errors.length ? `GraphQL returned ${errors.length} error(s)${codes.length ? ` (${codes.join(', ')})` : ''}` : 'Response contained no matching post');
         }
-        const owner = media.user?.username || media.owner?.username;
-        if (route.mode === 'profile' && owner && owner.toLowerCase() !== route.username.toLowerCase()) throw new Error('Post owner did not match the profile');
-        cacheMedia({ ...media, code: code || media.code, __preview: false }, route, 'post details');
+        // detailMedia has already verified the requested post identity. A profile can contain another author's collaborative post.
+        cacheMedia({ ...media, code: code || media.code, __preview: false, __fullDetails: true }, route, 'post details');
         const result = native.items.get(key)?.media;
         if (result && postShape(result).complete) return result;
-        throw new Error('Matching post is missing full slide sources');
+        const incomplete = new Error('Matching post is missing full slide sources');
+        incomplete.retryable = true;
+        throw incomplete;
       } catch (error) {
         if (error?.name === 'AbortError') throw error;
         failure = error;
+        retryable ||= Boolean(error.retryable || error.responseFormat || error.status >= 500 || /network|fetch|timed out/i.test(error.message || ''));
         const endpoint = request.options.method === 'POST' ? 'graphql' : 'media-info';
         attempts.push(`${endpoint}: ${error.message || String(error)}`);
         if ([401, 403, 429].includes(error?.status)) {
@@ -442,7 +448,28 @@
       }
     }
     failure.message = attempts.join('; ') || failure.message;
+    failure.retryable = retryable;
     throw failure;
+  }
+
+  function waitForRecovery(delay, signal) {
+    return new Promise((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); };
+      const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, delay);
+      if (signal.aborted) abort();
+      else signal.addEventListener('abort', abort, { once: true });
+    });
+  }
+
+  async function resolvePostDetails(original, generation, route, signal) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      checkSession(generation, route, signal);
+      try { return await resolvePostDetailsAttempt(original, generation, route, signal); }
+      catch (error) {
+        if (signal.aborted || state.detailPaused || !error.retryable || attempt === 2) throw error;
+        await waitForRecovery(attempt === 0 ? 1000 : 4000, signal);
+      }
+    }
   }
 
   async function expandPosts(items, generation, route, signal) {
@@ -578,6 +605,10 @@
       if (element.tagName === 'IMG' && width > 0 && width < 100 && height < 100) continue;
       const current = normalizeMediaUrl(element.currentSrc || element.src);
       if (!current) continue;
+      if (route.mode === 'profile' && !native.profileCodes.has(code)) {
+        native.profileCodes.add(code);
+        native.scripts = new WeakSet();
+      }
       const candidates = [];
       if (element.tagName === 'IMG') {
         for (const piece of (element.srcset || '').split(/,\s*(?=https?:)/)) {
@@ -685,13 +716,13 @@
     return {
       items: pending.map(([, value]) => value.media),
       next_max_id: `native:${++state.nativeStep}`,
-      more_available: native.pageInfo?.more !== false,
+      more_available: state.profileSweep || native.pageInfo?.more !== false,
       __native: true, __waiting: waiting && !pending.length,
       __preview: pending.some(([, value]) => value.media.__preview),
     };
   }
 
-  function scrollInstagram() {
+  function scrollInstagram(position = 'bottom') {
     const main = doc.querySelector('main');
     let target = main;
     while (target && target !== doc.body && target !== doc.documentElement) {
@@ -700,10 +731,12 @@
       target = target.parentElement;
     }
     target = target && target !== doc.body && target !== doc.documentElement ? target : (doc.scrollingElement || doc.documentElement);
-    const top = Math.max(0, target.scrollHeight - target.clientHeight);
+    const top = position === 'top' ? 0 : Math.min(Math.max(0, target.scrollHeight - target.clientHeight),
+      target.scrollTop + Math.max(600, target.clientHeight || win.innerHeight || 800));
     if (target === doc.scrollingElement || target === doc.documentElement) win.scrollTo({ top, behavior: 'instant' });
     else target.scrollTo({ top, behavior: 'instant' });
     target.dispatchEvent(new win.Event('scroll', { bubbles: true }));
+    return top >= Math.max(0, target.scrollHeight - target.clientHeight);
   }
 
   async function fetchPage(_cursor, signal) {
@@ -712,17 +745,20 @@
     checkSession(generation, route, signal);
     scanPageData(route);
     scanVisibleMedia(route);
-    if (pendingNativeItems().length || native.pageInfo?.more === false) return takeNativePage();
+    scanPageData(route);
+    if (pendingNativeItems().length || (!state.profileSweep && native.pageInfo?.more === false)) return takeNativePage();
     if (route.mode === 'post') return takeNativePage(true);
     ui.setStatus('Waiting for Instagram to load the next posts…');
-    scrollInstagram();
+    if (scrollInstagram()) state.profileSweep = false;
     const until = Date.now() + 6500;
     while (Date.now() < until) {
       await new Promise(resolve => setTimeout(resolve, 200));
       checkSession(generation, route, signal);
       scanPageData(route);
       scanVisibleMedia(route);
-      if (pendingNativeItems().length || native.pageInfo?.more === false) return takeNativePage();
+      scanPageData(route);
+      if (pendingNativeItems().length || (!state.profileSweep && native.pageInfo?.more === false)) return takeNativePage();
+      if (scrollInstagram()) state.profileSweep = false;
     }
     return takeNativePage(true);
   }
@@ -747,6 +783,7 @@
     state.generation += 1;
     state.routeKey = route.key;
     state.mode = route.mode;
+    state.profileSweep = route.mode === 'profile';
     state.username = route.username;
     state.userId = '';
     state.nativeConsumed = new Map();
@@ -782,6 +819,11 @@
     try {
       if (state.mode === 'explore') throw new Error('Open a profile, tagged feed, home feed, post, or reel.');
       if (state.mode === 'profile' && !state.username) throw new Error('Open an Instagram profile first.');
+      if (state.mode === 'profile') {
+        state.profileSweep = !scrollInstagram('top');
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        if (generation !== state.generation || !state.opened) return;
+      }
       await loadNextPage();
     } catch (error) {
       if (generation === state.generation && error?.name !== 'AbortError') {
@@ -841,7 +883,7 @@
       checkSession(generation, route, state.controller.signal);
       const before = state.media.length;
       appendRawMedia(json.items);
-      await expandPosts(json.items, generation, route, state.controller.signal);
+      await expandPosts(incompletePosts().map(group => group.media), generation, route, state.controller.signal);
       checkSession(generation, route, state.controller.signal);
       const added = state.media.length - before;
       if (json.items.length && !detailsOnly) state.pagesLoaded += 1;
@@ -1398,8 +1440,8 @@
       if (route.key !== state.routeKey || (!state.media.length && !state.starting)) {
         resetSession(route);
         startSession();
-      } else if (incompletePosts().some(group => !state.detailJobs.has(postKey(group.media)))) {
-        loadNextPage(true);
+      } else if (incompletePosts().length) {
+        retryIncompletePosts();
       } else if (state.autoPaused || pendingNativeItems().length) {
         loadNextPage();
       }

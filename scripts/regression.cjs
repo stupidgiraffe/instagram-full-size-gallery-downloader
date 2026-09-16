@@ -5,6 +5,7 @@ const source = fs.readFileSync(new URL('../instagram-full-size-gallery-downloade
 const key = 'igFullSizeGallery.v2.settings';
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
+const until = async predicate => { for(let i=0;i<200;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,1));}assert.fail('Condition did not settle'); };
 const settle = async (n = 8) => { for (let i=0;i<n;i++) await new Promise(resolve => setImmediate(resolve)); };
 function photo(code, id, username='alice', url=`https://images.cdninstagram.com/${code}.jpg?oh=signed&oe=future`) {
  return { code, pk:id, user:{username}, media_type:1, image_versions2:{candidates:[{url,width:1080,height:1350}]}, original_width:1080, original_height:1350 };
@@ -22,6 +23,39 @@ function stack(code, id, count=6, videoAt=-1) {
 }
 const postResponse=post=>Response.json({data:{xdt_api__v1__media__shortcode__web_info:{items:[post]}}});
 const cover=code=>`<a href="/p/${code}/"><img src="https://images.cdninstagram.com/${code}-cover.jpg" width="300" height="400"></a>`;
+test('HTML fallback accepts the exact collaborative post with a different author',async()=>{
+ const post=stack('COLLAB','123');post.user.username='bob';
+ const e=environment({html:cover('COLLAB'),fetcher:async url=>url.includes('/graphql/')?new Response('<html>unavailable</html>'):Response.json({items:[post]})});
+ try{e.open();await until(()=>e.test.state.media.length===6);assert.equal(e.calls.length,2);assert.equal(JSON.parse(e.test.diagnosticReport()).incompletePosts,0)}finally{e.close()}
+});
+test('Profile grid membership admits a collaborative boot post but excludes unrelated authors',async()=>{
+ const post=stack('COLLAB','123');post.user.username='bob';
+ const other=stack('OTHER','456');other.user.username='bob';
+ const e=environment({html:cover('COLLAB'),boot:{posts:[post,other]}});
+ try{e.open();await settle(30);assert.equal(e.test.state.media.length,6);assert.equal(e.calls.length,0);assert(e.test.state.media.every(item=>item.shortcode==='COLLAB'))}finally{e.close()}
+});
+test('Two feed slides without a count are verified against full post details',async()=>{
+ const full=stack('UNKNOWN','123');delete full.carousel_media_count;
+ const partial={...full,carousel_media:full.carousel_media.slice(0,2)};
+ const e=environment({boot:timeline([partial],false),fetcher:async()=>postResponse(full)});
+ try{e.open();await until(()=>e.test.state.media.length===6);assert.equal(e.calls.length,1);assert.equal(JSON.parse(e.test.diagnosticReport()).incompletePosts,0)}finally{e.close()}
+});
+test('Temporary HTML and server errors recover automatically without clicking retry',async()=>{
+ let calls=0;
+ const e=environment({html:cover('RECOVER'),fetcher:async()=>{calls++;return calls===1?new Response('<html>temporary</html>'):calls===2?new Response('',{status:503}):postResponse(stack('RECOVER','123'))}});
+ try{e.open();await until(()=>e.test.state.media.length===6);assert.equal(calls,3);assert.equal(JSON.parse(e.test.diagnosticReport()).incompletePosts,0)}finally{e.close()}
+});
+test('Closing during retry backoff cancels further detail requests',async()=>{
+ const e=environment({html:cover('RETRY'),fetcher:async()=>new Response('',{status:503})});
+ const timeout=e.w.setTimeout;e.w.setTimeout=(fn,delay,...args)=>timeout(fn,delay===1000?15000:delay,...args);
+ try{e.open();await until(()=>e.calls.length===2);e.root.querySelector('[data-action="close"]').click();await settle(30);assert.equal(e.calls.length,2);assert.equal(e.test.state.loading,false)}finally{e.close()}
+});
+test('Starting at the bottom sweeps virtualized profile rows even when feed says end reached',async()=>{
+ const e=environment({boot:timeline([photo('LAST','99')],false),html:cover('LAST'),fetcher:async(_url,options)=>postResponse(photo(JSON.parse(new URLSearchParams(options.body).get('variables')).shortcode,'123'))});
+ const target=e.w.document.documentElement;Object.defineProperties(target,{scrollHeight:{value:2400},clientHeight:{value:800}});target.scrollTop=1600;
+ const positions=[];e.w.scrollTo=({top})=>{target.scrollTop=top;positions.push(top);e.w.document.querySelector('main').innerHTML=cover(top===0?'FIRST':top<1600?'MIDDLE':'LAST')};
+ try{e.open();await until(()=>!e.test.state.starting&&e.test.state.media.length>=2);assert.equal(positions[0],0);for(let i=0;i<4&&!e.test.state.exhausted;i++)await e.test.loadNextPage();assert(e.test.state.media.some(item=>item.shortcode==='FIRST'));assert(e.test.state.media.some(item=>item.shortcode==='MIDDLE'));assert(e.test.state.media.some(item=>item.shortcode==='LAST'));assert.equal(e.test.state.exhausted,true)}finally{e.close()}
+});
 test('Prefixed JSON post details expand all six slides without transport retry',async()=>{
  const e=environment({html:cover('SIX'),fetcher:async()=>new Response('for (;;);'+JSON.stringify({data:{xdt_api__v1__media__shortcode__web_info:{items:[stack('SIX','74263')]}}}))});
  try{e.open();await settle(30);assert.equal(e.test.state.media.length,6);assert.equal(e.calls.length,1);assert.equal(e.test.state.media.filter(item=>item.preview).length,0)}finally{e.close()}
@@ -35,7 +69,7 @@ test('HTML and GraphQL failures expose endpoint reasons without a duplicate mana
  let managerCalls=0;
  const e=environment({html:cover('SIX'),fetcher:async(url)=>url.includes('/graphql/')?new Response('<!doctype html><title>Login</title>'):Response.json({errors:[{message:'private server text',extensions:{code:'QUERY_FAILED'}}]})});
  e.w.GM_xmlhttpRequest=()=>{managerCalls++;throw new Error('Unexpected duplicate request')};
- try{e.open();await settle(30);assert.equal(e.calls.length,2);assert.equal(managerCalls,0);const report=JSON.parse(e.test.diagnosticReport());assert.equal(report.incompletePosts,1);assert.match(report.postDetailErrors[0],/graphql: Instagram returned HTML/);assert.match(report.postDetailErrors[0],/media-info: GraphQL returned 1 error\(s\) \(QUERY_FAILED\)/);assert(!report.postDetailErrors[0].includes('private server text'))}finally{e.close()}
+ try{e.open();await until(()=>JSON.parse(e.test.diagnosticReport()).postDetailFailures===1);assert.equal(e.calls.length,6);assert.equal(managerCalls,0);const report=JSON.parse(e.test.diagnosticReport());assert.equal(report.incompletePosts,1);assert.match(report.postDetailErrors[0],/graphql: Instagram returned HTML/);assert.match(report.postDetailErrors[0],/media-info: GraphQL returned 1 error\(s\) \(QUERY_FAILED\)/);assert(!report.postDetailErrors[0].includes('private server text'))}finally{e.close()}
 });
 test('Manager transport decodes prefixed text after native fetch fails',async()=>{
  const e=environment({html:cover('SIX'),fetcher:async()=>{throw new TypeError('Failed to fetch')}});
@@ -49,6 +83,7 @@ function environment({script=source,boot=null,html='',gm=new Map(),local=new Map
  w.Date.now=()=>time;
  w.setTimeout=(fn,delay=0,...args)=>setTimeout(()=>{time+=delay;fn(...args)},delay===15000?15000:0);
  w.clearTimeout=clearTimeout;
+ w.requestAnimationFrame=fn=>setImmediate(fn);
  w.setInterval=()=>0;
  w.GM_getValue=(k,fallback)=>gm.get(k)??fallback;
  w.GM_setValue=(k,v)=>gm.set(k,v);
@@ -79,7 +114,7 @@ function environment({script=source,boot=null,html='',gm=new Map(),local=new Map
  return {w,dom,calls,gm,menus,root,test:w.__test,open:()=>root.querySelector('.launcher').click(),close:()=>dom.window.close()};
 }
 test('Full userscript loads boot media and carousel while all REST calls would return 404',async()=>{
- const first=photo('A','101'); const carousel={code:'B',pk:'102',user:{username:'alice'},carousel_media:[photo('','201'),photo('','202')]};
+ const first=photo('A','101'); const carousel={code:'B',pk:'102',user:{username:'alice'},carousel_media_count:2,carousel_media:[photo('','201'),photo('','202')]};
  const e=environment({boot:{require:[['loader',null,{result:timeline([first,carousel],false)}]]},instrument:false});
  try{e.open();await settle();assert.equal(e.root.querySelectorAll('.media-card').length,3);assert.equal(e.calls.length,0);assert.match(e.root.querySelector('.status').textContent,/end reached/);assert.equal(e.root.querySelector('.media-frame img').src,first.image_versions2.candidates[0].url)}finally{e.close()}
 });
