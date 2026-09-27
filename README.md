@@ -170,7 +170,7 @@ Common symptoms:
 - **A download fails:** the script tries available media URLs, a blob download, and one expired-media refresh. It reports failure if these fail; opening a remote URL does not count as a successful download.
 - **HTTP 404 during gallery loading:** v2.1.6 reads Instagram's own page data and native responses, without requesting the old profile/feed REST routes. Use **Copy diagnostics** to include the script version and failed endpoint/status in a report.
 - **Waiting for more posts:** the gallery has paused because Instagram did not return more media. Close the gallery, check that Instagram itself loads the posts, then reopen or press **Load more**. A timeout does not count as the end of the feed.
-- **Only a cover appears:** v2.1.9 automatically requests complete post details and expands every available slide. Temporary failures retry automatically (three rounds with backoff). Exact collaborative-post matches are accepted even with a different primary author. If Instagram still rejects the request, the post stays labeled incomplete; use **Retry incomplete posts**. The script does not count an unresolved cover as a complete carousel. If retry fails, copy diagnostics and include `postDetailErrors`; these distinguish HTML responses, GraphQL errors, and missing matching post data.
+- **Only a cover appears:** v2.1.10 automatically requests complete post details and expands every available slide. Temporary failures retry automatically (three rounds with backoff). Exact collaborative-post matches are accepted even with a different primary author. If Instagram still rejects the request, the post stays labeled incomplete; use **Retry incomplete posts**. The script does not count an unresolved cover as a complete carousel. If retry fails, copy diagnostics and include `postDetailErrors`; these distinguish HTML responses, GraphQL errors, and missing matching post data.
 
 Use the [bug-report template](https://github.com/stupidgiraffe/instagram-full-size-gallery-downloader/issues/new/choose) for reproducible regressions.
 
@@ -230,3 +230,5 @@ This project is not affiliated with, endorsed by, or sponsored by Instagram or M
 Licensed under the [GNU Affero General Public License v3.0 or later](LICENSE).
 
 New profile sessions return Instagram’s underlying page to the top and scan down by viewport to discover rows above the launch position, including virtualized grids. The script still depends on Instagram returning the media; unavailable posts are never reported as complete.
+
+Diagnostics distinguish discovered posts from full-detail-verified posts. `moreKnown: true` means more feed posts remain; use **Load all** to continue. `incompletePosts: 0` only covers known metadata, not unseen posts. Later summaries preserve known slides, and newly discovered gaps trigger detail retrieval automatically.

@@ -13,7 +13,7 @@
 // @compatible   brave
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
-// @version      2.1.9
+// @version      2.1.10
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -236,7 +236,7 @@
     };
   }
 
-  const VERSION = '2.1.9';
+  const VERSION = '2.1.10';
   const POST_QUERY_ID = '27128499623469141';
   const native = {
     key: '', items: new Map(), profileCodes: new Set(), scripts: new WeakSet(), sequence: 0,
@@ -284,14 +284,28 @@
   }
 
   function postShape(media) {
-    const children = [media?.carousel_media, media?.carousel_media_items,
+    const arrays = [media?.carousel_media, media?.carousel_media_items,
       media?.edge_sidecar_to_children?.edges?.map(edge => edge.node).filter(Boolean)]
-      .filter(items => Array.isArray(items) && items.length).sort((a, b) => b.length - a.length)[0] || [];
-    const expected = Number(media?.carousel_media_count || media?.carousel_count || media?.edge_sidecar_to_children?.count || 0);
-    const carousel = media?.media_type === 8 || /Sidecar/.test(media?.__typename || '') || expected > 1 || children.length > 1;
+      .filter(items => Array.isArray(items) && items.length);
+    const unique = items => {
+      const seen = new Set();
+      return items.filter(child => {
+        const id = child?.pk || child?.id;
+        if (!id) return true;
+        const key = String(id);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    };
+    const children = arrays.map(unique).sort((a, b) => b.length - a.length)[0] || [];
+    const declared = [media?.carousel_media_count, media?.carousel_count, media?.edge_sidecar_to_children?.count]
+      .map(Number).filter(value => Number.isSafeInteger(value) && value > 0);
+    const expected = Math.max(0, Number(media?.__expectedSlides) || 0, ...declared, ...arrays.map(items => items.length));
+    const carousel = Number(media?.media_type) === 8 || /Sidecar/.test(media?.__typename || '') || expected > 1 || children.length > 1;
     const hasSource = child => (isVideo(child) ? videoCandidates(child) : imageCandidates(child)).length > 0;
     const complete = !media?.__preview && (carousel
-      ? (expected > 0 || media.__fullDetails === true) && children.length >= (expected || 2) && children.every(hasSource)
+      ? (declared.length > 0 || media.__fullDetails === true) && children.length >= (expected || 2) && children.every(hasSource)
       : hasSource(media));
     return { children, expected, carousel, complete };
   }
@@ -300,22 +314,20 @@
     if (!previous) return incoming;
     if (incoming.__preview && !previous.__preview) return previous;
     const before = postShape(previous), after = postShape(incoming);
-    if (before.complete && (incoming.__preview || (!after.complete && before.expected >= after.expected))) return previous;
+    if (previous.__preview && !before.carousel && after.complete && !after.carousel) return incoming;
     const merged = { ...previous, ...incoming, __preview: Boolean(incoming.__preview),
       user: incoming.user || incoming.owner || previous.user || previous.owner };
-    if (after.complete && (!before.expected || (after.children.length || 1) >= before.expected)) {
-      delete merged.carousel_media;
-      delete merged.carousel_media_items;
-      delete merged.edge_sidecar_to_children;
-      if (after.children.length) merged.carousel_media = after.children;
-      return merged;
-    }
-    const children = after.children.length >= before.children.length ? after.children : before.children;
+    const useIncoming = after.children.length > before.children.length
+      || (after.children.length === before.children.length && (!before.complete || after.complete));
+    const children = useIncoming ? after.children : before.children;
+    delete merged.carousel_media;
     delete merged.carousel_media_items;
     delete merged.edge_sidecar_to_children;
     if (children.length) merged.carousel_media = children;
-    if (before.carousel || after.carousel) merged.media_type = 8;
-    merged.carousel_media_count = Math.max(before.expected, after.expected);
+    if (before.carousel || after.carousel) {
+      merged.media_type = 8;
+      merged.__expectedSlides = Math.max(before.expected, after.expected, children.length);
+    }
     return merged;
   }
 
@@ -335,6 +347,7 @@
       appendRawMedia([media]);
       state.nativeConsumed.set(key, signature);
       ui?.refresh();
+      Promise.resolve().then(resumeUnfinishedDetails);
     }
   }
 
@@ -482,6 +495,7 @@
         const original = pending[next++], key = postKey(original);
         if (state.postGroups.get(key)?.complete) continue;
         let job = jobs.get(key);
+        if (job?.status === 'done') { jobs.delete(key); job = null; }
         if (!job) {
           job = { status: 'loading', promise: null };
           jobs.set(key, job);
@@ -505,6 +519,14 @@
 
   function incompletePosts() {
     return [...state.postGroups.values()].filter(group => !group.complete);
+  }
+
+  function resumeUnfinishedDetails() {
+    if (!state.opened || state.loading || state.detailPaused) return;
+    if (incompletePosts().some(group => {
+      const job = state.detailJobs.get(postKey(group.media));
+      return !job || job.status === 'done';
+    })) loadNextPage(true);
   }
 
   async function retryIncompletePosts() {
@@ -767,6 +789,10 @@
     return JSON.stringify({
       version: VERSION, mode: state.mode, loader: 'Instagram page responses',
       hooks: native.hooks, observedRequests: native.requests, capturedResponses: native.responses,
+      discoveredPosts: state.postGroups.size,
+      detailVerifiedPosts: [...state.postGroups.values()].filter(group => group.media.__fullDetails && group.complete).length,
+      profileScanPending: Boolean(state.profileSweep),
+      feedEndObserved: native.pageInfo?.more === false,
       cachedPosts: native.items.size, renderedMedia: state.media.length, paused: state.autoPaused,
       pagesLoaded: state.pagesLoaded, moreKnown: native.pageInfo?.more ?? null,
       recentHttpErrors: native.errors, failedMedia: state.stats.failures,
@@ -910,6 +936,7 @@
       if (generation === state.generation) {
         state.loading = false;
         ui.refresh();
+        Promise.resolve().then(resumeUnfinishedDetails);
       }
     }
   }

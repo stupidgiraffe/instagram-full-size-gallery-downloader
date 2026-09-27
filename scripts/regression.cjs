@@ -23,6 +23,26 @@ function stack(code, id, count=6, videoAt=-1) {
 }
 const postResponse=post=>Response.json({data:{xdt_api__v1__media__shortcode__web_info:{items:[post]}}});
 const cover=code=>`<a href="/p/${code}/"><img src="https://images.cdninstagram.com/${code}-cover.jpg" width="300" height="400"></a>`;
+test('A later short summary cannot remove already retrieved carousel slides',async()=>{
+ const full=stack('KEEP','123');delete full.carousel_media_count;
+ const e=environment({html:cover('KEEP'),fetcher:async()=>postResponse(full)});
+ try{e.open();await until(()=>e.test.state.media.length===6);e.test.ingestPayload(timeline([{...full,carousel_media_count:2,carousel_media:full.carousel_media.slice(0,2)}],false),e.test.detectRoute());assert.equal(e.test.state.media.length,6);assert.equal(JSON.parse(e.test.diagnosticReport()).incompletePosts,0)}finally{e.close()}
+});
+test('Conflicting carousel counts use the largest declared total',async()=>{
+ const partial=stack('COUNT','123',2);partial.carousel_count=6;
+ const e=environment({boot:timeline([partial],false),fetcher:async()=>postResponse(stack('COUNT','123'))});
+ try{e.open();await until(()=>!e.test.state.starting);assert.equal(e.test.state.media.length,6);assert.equal(e.calls.length,1)}finally{e.close()}
+});
+test('Duplicate slide IDs cannot satisfy a declared carousel total',async()=>{
+ const partial=stack('DUPE','123');partial.carousel_media[5]=partial.carousel_media[4];
+ const e=environment({boot:timeline([partial],false),fetcher:async()=>postResponse(stack('DUPE','123'))});
+ try{e.open();await until(()=>!e.test.state.starting);assert.equal(e.calls.length,1);assert.equal(new Set(e.test.state.media.map(item=>item.mediaId)).size,6)}finally{e.close()}
+});
+test('New evidence of missing slides reopens a previously successful detail job',async()=>{
+ let full=stack('GROW','123',2);
+ const e=environment({html:cover('GROW'),fetcher:async()=>postResponse(full)});
+ try{e.open();await until(()=>!e.test.state.starting&&e.test.state.media.length===2);full=stack('GROW','123',6);e.test.ingestPayload(timeline([{...full,carousel_media:full.carousel_media.slice(0,2)}],false),e.test.detectRoute());await until(()=>e.test.state.media.length===6);assert.equal(e.calls.length,2)}finally{e.close()}
+});
 test('HTML fallback accepts the exact collaborative post with a different author',async()=>{
  const post=stack('COLLAB','123');post.user.username='bob';
  const e=environment({html:cover('COLLAB'),fetcher:async url=>url.includes('/graphql/')?new Response('<html>unavailable</html>'):Response.json({items:[post]})});

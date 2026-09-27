@@ -95,3 +95,7 @@ Automated fixtures cover prefixed JSON, newline-delimited nested post data, mana
 - Verify a collaborative post whose primary author differs from the profile, including when GraphQL fails and media-info succeeds.
 - Confirm transient failures retry automatically; closing or navigating cancels backoff. Persistent unavailable posts remain visibly incomplete.
 - Automated tests cover these scenarios with fixtures; authenticated Instagram verification is still required.
+
+### Silent carousel loss (2.1.10)
+
+Regression fixtures verify six retrieved slides survive a later two-slide summary; conflicting totals trigger retrieval; duplicate IDs cannot satisfy completeness; and new missing-slide evidence automatically reopens a completed detail job. Live checks should compare a specific native post's ordered slides with the gallery. Clean error counters alone are not proof of profile coverage, especially with moreKnown=true.

@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.10] - 2026-09-27
+
+### Fixed
+
+- Preserve the largest known carousel size and previously retrieved slides when later summaries report fewer items, including full-detail responses with no declared total.
+- Reconcile competing count fields using the largest value. Count unique slide IDs, so duplicated records cannot hide a missing slide.
+- Reopen successful detail jobs automatically when new metadata reveals missing slides, including after feed exhaustion. Existing rate-limit pauses and bounded failure retries remain in force.
+- Keep inferred minimum slide counts separate from declared totals so repeatedly merging an unknown-count summary does not falsely verify it.
+- Add discoveredPosts, detailVerifiedPosts, profileScanPending, and feedEndObserved diagnostics to distinguish known-post completeness from profile coverage.
+
+### Validation
+
+- Four new regressions fail against v2.1.9 and pass after these changes; all 47 tests pass.
+- The supplied run still had moreKnown=true. Its clean error counters do not establish full-profile coverage or identify which reproduced defect occurred in that session. Authenticated live verification remains pending.
+
 ## [2.1.9] - 2026-09-16
 
 ### Fixed
