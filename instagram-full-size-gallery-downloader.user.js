@@ -13,7 +13,7 @@
 // @compatible   brave
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
-// @version      2.1.10
+// @version      2.1.11
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -52,6 +52,7 @@
   const DEFAULTS = Object.freeze({
     layout: 'fit',          // fit | masonry | classic | contact
     imageSize: 'large',     // medium | large | huge
+    sort: 'profile',       // profile | newest | oldest | largest | smallest
     filter: 'all',          // all | image | video
     captions: false,
     autoLoad: true,
@@ -70,7 +71,6 @@
     generation: 0,
     mode: 'profile',
     username: '',
-    userId: '',
     nextCursor: null,
     hasMore: false,
     exhausted: false,
@@ -79,8 +79,6 @@
     opened: false,
     pagesLoaded: 0,
     media: [],
-    seenMedia: new Set(),
-    seenCursors: new Set(),
     controller: null,
     observer: null,
     lightboxIndex: -1,
@@ -236,10 +234,10 @@
     };
   }
 
-  const VERSION = '2.1.10';
+  const VERSION = '2.1.11';
   const POST_QUERY_ID = '27128499623469141';
   const native = {
-    key: '', items: new Map(), profileCodes: new Set(), scripts: new WeakSet(), sequence: 0,
+    key: '', items: new Map(), profileCodes: new Set(), profileOrder: new Map(), pendingUpdates: null, scripts: new WeakSet(), sequence: 0,
     pageInfo: null, requests: 0, responses: 0, errors: [], hooks: [],
   };
   const originalFetch = typeof win.fetch === 'function' ? win.fetch.bind(win) : null;
@@ -251,6 +249,7 @@
       native.key = route.key;
       native.items.clear();
       native.profileCodes.clear();
+      native.profileOrder.clear();
       native.scripts = new WeakSet();
       native.pageInfo = null;
       native.sequence = 0;
@@ -344,6 +343,7 @@
     cache.sequence += 1;
     if (cache.items.size > 600) cache.items.delete(cache.items.keys().next().value);
     if (state.opened && state.routeKey === route.key && state.postGroups.has(key)) {
+      if (native.pendingUpdates) { native.pendingUpdates.set(key, media); return; }
       appendRawMedia([media]);
       state.nativeConsumed.set(key, signature);
       ui?.refresh();
@@ -523,6 +523,7 @@
 
   function resumeUnfinishedDetails() {
     if (!state.opened || state.loading || state.detailPaused) return;
+    if (!state.postGroups.size && native.items.size && state.autoPaused) { loadNextPage(); return; }
     if (incompletePosts().some(group => {
       const job = state.detailJobs.get(postKey(group.media));
       return !job || job.status === 'done';
@@ -574,6 +575,10 @@
       const feed = inFeed || /timeline|usertags|tagged|edge_owner_to_timeline_media/.test(path);
       const eligible = items => source === 'network' || items.some(item => mediaMatchesRoute(item.node || item.media || item, route));
       if (node.page_info && Array.isArray(node.edges) && feed && eligible(node.edges)) {
+        for (const edge of node.edges) {
+          const media = edge.node?.media || edge.node;
+          if (mediaMatchesRoute(media, route) && !native.profileOrder.has(postKey(media))) native.profileOrder.set(postKey(media), native.profileOrder.size);
+        }
         const info = node.page_info;
         if (typeof info.has_next_page === 'boolean' && (source === 'network' || native.pageInfo === null)) native.pageInfo = { more: info.has_next_page, cursor: info.end_cursor || null };
       }
@@ -589,7 +594,17 @@
         walk(child, `${path}.${key}`, depth + 1, feed);
       }
     }
-    walk(value);
+    const updates = new Map();
+    native.pendingUpdates = updates;
+    try { walk(value); } finally { native.pendingUpdates = null; }
+    if (state.opened && state.routeKey === route.key && state.postGroups.size) {
+      if (updates.size) {
+        appendRawMedia([...updates.values()]);
+        for (const key of updates.keys()) state.nativeConsumed.set(key, native.items.get(key)?.signature);
+        Promise.resolve().then(resumeUnfinishedDetails);
+      } else orderGallery();
+    }
+    if (state.opened && !state.postGroups.size && state.autoPaused && native.items.size) Promise.resolve().then(resumeUnfinishedDetails);
   }
 
   function scanPageData(route = detectRoute()) {
@@ -599,6 +614,23 @@
       native.scripts.add(script);
       for (const value of parsePayload(script.textContent)) ingestPayload(value, route, 'page data');
     }
+  }
+
+  function scanAvailableMedia(route = detectRoute()) {
+    scanVisibleMedia(route);
+    scanPageData(route);
+  }
+
+  async function waitForProfileReady(generation, route, signal) {
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      checkSession(generation, route, signal);
+      scanAvailableMedia(route);
+      if (native.items.size || native.pageInfo?.more === false) return;
+      ui.setStatus('Waiting for Instagram’s first profile posts…');
+      await waitForRecovery(200, signal);
+    }
+    throw new Error('Instagram has not loaded the profile posts yet. Press Load more to retry.');
   }
 
   function normalizeMediaUrl(value) {
@@ -765,9 +797,14 @@
     const generation = state.generation;
     const route = detectRoute();
     checkSession(generation, route, signal);
-    scanPageData(route);
-    scanVisibleMedia(route);
-    scanPageData(route);
+    if (route.mode === 'profile' && !state.profilePrepared) {
+      await waitForProfileReady(generation, route, signal);
+      state.profileSweep = !scrollInstagram('top');
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      checkSession(generation, route, signal);
+      state.profilePrepared = true;
+    }
+    scanAvailableMedia(route);
     if (pendingNativeItems().length || (!state.profileSweep && native.pageInfo?.more === false)) return takeNativePage();
     if (route.mode === 'post') return takeNativePage(true);
     ui.setStatus('Waiting for Instagram to load the next posts…');
@@ -776,9 +813,7 @@
     while (Date.now() < until) {
       await new Promise(resolve => setTimeout(resolve, 200));
       checkSession(generation, route, signal);
-      scanPageData(route);
-      scanVisibleMedia(route);
-      scanPageData(route);
+      scanAvailableMedia(route);
       if (pendingNativeItems().length || (!state.profileSweep && native.pageInfo?.more === false)) return takeNativePage();
       if (scrollInstagram()) state.profileSweep = false;
     }
@@ -809,9 +844,9 @@
     state.generation += 1;
     state.routeKey = route.key;
     state.mode = route.mode;
+    state.profilePrepared = false;
     state.profileSweep = route.mode === 'profile';
     state.username = route.username;
-    state.userId = '';
     state.nativeConsumed = new Map();
     state.nativeStep = 0;
     state.autoPaused = false;
@@ -830,8 +865,6 @@
     state.loadAll = false;
     state.pagesLoaded = 0;
     state.media = [];
-    state.seenMedia = new Set();
-    state.seenCursors = new Set();
     state.lightboxIndex = -1;
     state.stats = { images: 0, videos: 0, carousels: 0, ads: 0, duplicates: 0, failures: 0 };
     ui?.clearGallery();
@@ -845,11 +878,6 @@
     try {
       if (state.mode === 'explore') throw new Error('Open a profile, tagged feed, home feed, post, or reel.');
       if (state.mode === 'profile' && !state.username) throw new Error('Open an Instagram profile first.');
-      if (state.mode === 'profile') {
-        state.profileSweep = !scrollInstagram('top');
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        if (generation !== state.generation || !state.opened) return;
-      }
       await loadNextPage();
     } catch (error) {
       if (generation === state.generation && error?.name !== 'AbortError') {
@@ -860,30 +888,6 @@
     } finally {
       if (generation === state.generation) state.starting = false;
     }
-  }
-
-  function extractPage(json) {
-    const timeline = json?.data?.xdt_api__v1__feed__user_timeline_graphql_connection
-      || json?.data?.user?.edge_owner_to_timeline_media
-      || json?.user?.edge_owner_to_timeline_media
-      || json?.edge_owner_to_timeline_media;
-
-    const items = timeline?.edges?.map(edge => edge.node).filter(Boolean)
-      || json?.items?.map(item => item?.media || item).filter(Boolean)
-      || json?.feed_items?.map(item => item?.media_or_ad || item?.media).filter(Boolean)
-      || json?.data?.xdt_api__v1__feed__user_timeline_graphql_connection?.edges?.map(edge => edge.node).filter(Boolean)
-      || [];
-
-    const cursor = timeline?.page_info?.end_cursor
-      || json?.next_max_id
-      || json?.next_max_id_value
-      || null;
-
-    const more = timeline?.page_info?.has_next_page
-      ?? json?.more_available
-      ?? Boolean(cursor);
-
-    return { items, cursor: cursor ? String(cursor) : null, more: Boolean(more && cursor) };
   }
 
   async function loadNextPage(detailsOnly = false) {
@@ -1045,17 +1049,20 @@
           posterUrl: posterSources[0]?.url || '', shortcode, username, caption,
           postUrl: shortcode ? `https://www.instagram.com/p/${shortcode}/` : location.href,
           carouselIndex: index, carouselTotal: shape.expected || (shape.complete ? children.length : 0),
+          previewUrl: (imageCandidates(child).at(-1) || imageCandidates(parent).at(-1))?.url || '',
           width: sources[0].width || Number(child.original_width || child.width || child.dimensions?.width || 0),
           height: sources[0].height || Number(child.original_height || child.height || child.dimensions?.height || 0),
         });
         if (!entry.card || previousType !== type) {
           const oldCard = entry.card;
           if (oldCard) {
+            ui.releaseCard(oldCard);
             mediaBindings.get(oldCard.querySelector('img, video'))?.();
             oldCard.remove();
           }
-          entry.card = ui.createCard(entry, 0);
+          entry.card = ui.createCard(entry, state.mediaById.size);
         } else {
+          ui.updateCardPreview(entry.card, entry);
           if (changed) setSourceWithFallback(entry.card.querySelector('img, video'), entry);
           const image = entry.card.querySelector('img');
           if (image) image.alt = caption.slice(0, 160) || 'Instagram image';
@@ -1064,16 +1071,45 @@
         state.mediaById.set(stableId, entry);
         entries.push(entry);
       });
-      state.postGroups.set(key, { media: parent, entries, complete: shape.complete, carousel: shape.carousel });
+      state.postGroups.set(key, { media: parent, entries, complete: shape.complete, carousel: shape.carousel, order: previousGroup?.order ?? state.postGroups.size });
     }
-    state.media = [...state.postGroups.values()].flatMap(group => group.entries);
+    orderGallery(selectedId);
     const keep = new Set(state.media);
     for (const entry of oldEntries) if (!keep.has(entry)) {
+      ui.releaseCard(entry.card);
       mediaBindings.get(entry.card?.querySelector('img, video'))?.();
       entry.card?.remove();
     }
     state.mediaById = new Map(state.media.map(entry => [entry.id, entry]));
-    state.seenMedia = new Set(state.mediaById.keys());
+    ui.refresh();
+  }
+
+  function orderGallery(selectedId = state.media[state.lightboxIndex]?.id) {
+    const groups = [...state.postGroups.values()];
+    const timestamp = group => {
+      const value = Number(group.media.taken_at || group.media.taken_at_timestamp || group.media.timestamp || 0);
+      return value > 1e12 ? value / 1000 : value;
+    };
+    const compareAge = (a, b) => {
+      const aDate = timestamp(a), bDate = timestamp(b);
+      if (aDate && bDate && aDate !== bDate) return bDate - aDate;
+      const aId = mediaIdForPost(a.media).split('_')[0], bId = mediaIdForPost(b.media).split('_')[0];
+      if (aId && bId) return BigInt(aId) < BigInt(bId) ? 1 : BigInt(aId) > BigInt(bId) ? -1 : 0;
+      return a.order - b.order;
+    };
+    const area = group => Math.max(0, ...group.entries.map(entry => entry.width * entry.height));
+    const sort = state.settings.sort;
+    groups.sort((a, b) => {
+      if (sort === 'newest' || sort === 'oldest') return (sort === 'oldest' ? -1 : 1) * compareAge(a, b) || a.order - b.order;
+      if (sort === 'largest' || sort === 'smallest') {
+        const aa = area(a), bb = area(b);
+        if (!aa || !bb) return aa ? -1 : bb ? 1 : a.order - b.order;
+        return (sort === 'smallest' ? aa - bb : bb - aa) || a.order - b.order;
+      }
+      const ar = native.profileOrder.get(postKey(a.media)), br = native.profileOrder.get(postKey(b.media));
+      return (ar ?? Number.MAX_SAFE_INTEGER) - (br ?? Number.MAX_SAFE_INTEGER) || a.order - b.order;
+    });
+    state.media = groups.flatMap(group => group.entries);
     let cursor = ui.gallery.firstChild;
     state.media.forEach((entry, index) => {
       entry.card.dataset.index = String(index);
@@ -1082,9 +1118,8 @@
     });
     state.stats.images = state.media.filter(entry => entry.type === 'image').length;
     state.stats.videos = state.media.length - state.stats.images;
-    state.stats.carousels = [...state.postGroups.values()].filter(group => group.carousel).length;
+    state.stats.carousels = groups.filter(group => group.carousel).length;
     ui.syncViewer(selectedId);
-    ui.refresh();
   }
 
   async function refreshedSources(entry, signal) {
@@ -1305,6 +1340,7 @@
     ui.refresh();
 
     while (state.loadAll && state.opened && !state.exhausted) {
+      if (state.loading) { await new Promise(resolve => setTimeout(resolve, 100)); continue; }
       const result = await loadNextPage();
       if (result?.error || result?.aborted || result?.stale || result?.waiting || result?.busy) break;
       if (!state.hasMore) break;
@@ -1355,6 +1391,7 @@
           <div class="brand"><strong>IG Gallery ${VERSION}</strong><span class="pill mode">idle</span><span class="pill count">0 media</span></div>
           <div class="controls">
             <button data-action="layout">Layout: Fit</button>
+            <select data-setting="sort" aria-label="Sort posts"><option value="profile">Profile order</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="largest">Largest resolution</option><option value="smallest">Smallest resolution</option></select>
             <button data-action="filter">Filter: All</button>
             <button data-action="captions">Captions: Off</button>
             <button data-action="autoload">Auto: On</button>
@@ -1421,7 +1458,11 @@
     const viewerTitle = $('.viewer-title');
     const viewerStatus = $('.viewer-status');
     const toasts = $('.toasts');
+    const previewObserver = new IntersectionObserver(entries => {
+      for (const item of entries) if (item.isIntersecting) { item.target.loading = 'eager'; previewObserver.unobserve(item.target); }
+    }, { root: scroller, rootMargin: '1600px 0px' });
 
+    let appliedSort = state.settings.sort;
     const gesture = {
       scale: 1,
       panX: 0,
@@ -1452,6 +1493,7 @@
     }
 
     function clearGallery() {
+      previewObserver.disconnect();
       gallery.textContent = '';
       closeViewer();
     }
@@ -1463,6 +1505,7 @@
       host.style.pointerEvents = 'auto';
       applySettings();
       ensureObserver();
+      for (const image of gallery.querySelectorAll('img[loading="lazy"]')) previewObserver.observe(image);
       const route = detectRoute();
       if (route.key !== state.routeKey || (!state.media.length && !state.starting)) {
         resetSession(route);
@@ -1484,6 +1527,7 @@
       state.loadAll = false;
       state.controller?.abort();
       state.observer?.disconnect();
+      previewObserver.disconnect();
     }
 
     function applySettings() {
@@ -1512,6 +1556,7 @@
         else input.value = value;
       }
       for (const video of $$('video')) video.volume = Number(settings.videoVolume) || 0;
+      if (ui && appliedSort !== settings.sort) { appliedSort = settings.sort; orderGallery(); }
       refresh();
     }
 
@@ -1545,6 +1590,7 @@
       const frame = doc.createElement('div');
       frame.className = 'media-frame';
 
+
       if (entry.type === 'video') {
         const video = doc.createElement('video');
         video.controls = true;
@@ -1560,6 +1606,8 @@
         image.loading = 'lazy';
         image.decoding = 'async';
         setSourceWithFallback(image, entry);
+        if (index < 8) image.loading = 'eager';
+        previewObserver.observe(image);
         frame.appendChild(image);
       }
 
@@ -1580,6 +1628,7 @@
       );
       meta.append(line, caption, actions);
       card.append(frame, meta);
+      updateCardPreview(card, entry);
 
       card.addEventListener('click', event => {
         if (event.target.closest('button, video')) return;
@@ -1589,6 +1638,17 @@
         if (event.key === 'Enter') openViewer(Number(card.dataset.index));
       });
       return card;
+    }
+
+    function releaseCard(card) {
+      const image = card?.querySelector('img');
+      if (image) previewObserver.unobserve(image);
+    }
+
+    function updateCardPreview(card, entry) {
+      const frame = card.querySelector('.media-frame');
+      frame.style.aspectRatio = entry.width && entry.height ? `${entry.width} / ${entry.height}` : '';
+      frame.style.backgroundImage = entry.previewUrl ? `url(${JSON.stringify(entry.previewUrl)})` : '';
     }
 
     function button(label, handler) {
@@ -1606,8 +1666,8 @@
       return state.media[state.lightboxIndex] || null;
     }
 
-    function resetGesture() {
-      gesture.scale = 1;
+    function resetGesture(scale = 1) {
+      gesture.scale = scale;
       gesture.panX = 0;
       gesture.panY = 0;
       gesture.dragging = false;
@@ -1661,7 +1721,8 @@
       applyTransform();
     }
 
-    function openViewer(index) {
+    function openViewer(index, retainZoom = false) {
+      const scale = retainZoom ? gesture.scale : 1;
       const entry = state.media[index];
       if (!entry) return;
       state.lightboxIndex = index;
@@ -1684,7 +1745,8 @@
       }
 
       lightbox.classList.remove('hidden');
-      resetGesture();
+      resetGesture(scale);
+      viewerMedia.querySelector('img, video')?.addEventListener('load', applyTransform, { once: true });
       updateViewerMeta();
     }
 
@@ -1743,7 +1805,7 @@
           const result = await loadNextPage();
           if (generation !== state.generation || currentEntry()?.id !== selectedId || !state.opened) return;
           if (state.lightboxIndex + 1 < state.media.length) {
-            openViewer(state.lightboxIndex + 1);
+            openViewer(state.lightboxIndex + 1, true);
             return;
           }
           if (result?.error || result?.waiting || result?.busy || result?.aborted || result?.stale) return;
@@ -1752,12 +1814,12 @@
           updateViewerMeta('Some posts are incomplete. Use Retry incomplete posts in the gallery.');
           return;
         }
-        openViewer(0);
+        openViewer(0, true);
         toast('Reached the end and returned to the first item.', 'info');
         return;
       }
       const next = (state.lightboxIndex + delta + state.media.length) % state.media.length;
-      openViewer(next);
+      openViewer(next, true);
     }
 
     function ensureObserver() {
@@ -1945,7 +2007,7 @@
     applySettings();
 
     return {
-      root, gallery, open, close, setStatus, toast, clearGallery, refresh, createCard, applySettings, syncViewer,
+      root, gallery, open, close, setStatus, toast, clearGallery, refresh, createCard, updateCardPreview, releaseCard, applySettings, syncViewer,
     };
   }
 
@@ -1958,7 +2020,7 @@
       .toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:64px;padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--line);backdrop-filter:blur(18px)}.brand,.controls{display:flex;align-items:center;gap:8px}.controls{justify-content:flex-end;flex-wrap:wrap}.brand strong{font-size:18px}.pill{padding:5px 9px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--soft);font-size:12px}
       button,select,input{padding:8px 10px;color:var(--fg);background:var(--soft);border:1px solid var(--line);border-radius:11px}select option{color:#10131d;background:#fff}.app[data-theme=dark] select option{color:#f6f7fb;background:#161926}button{cursor:pointer}button:hover:not(:disabled){background:var(--hover)}button:disabled{opacity:.5;cursor:not-allowed}.danger{background:#ff4a681f;border-color:#ff4a6858}
       .statusbar{display:flex;justify-content:space-between;gap:14px;padding:8px 14px;color:var(--muted);font-size:13px;border-bottom:1px solid var(--line)}.scroller{min-height:0;overflow:auto;padding:18px;overscroll-behavior:contain}.sentinel{height:1px}.gallery{min-height:50vh}
-      .media-card{position:relative;overflow:hidden;background:var(--card);border:1px solid var(--line);border-radius:17px;box-shadow:0 10px 30px #0003}.media-card:hover{background:var(--hover)}.media-frame{display:grid;place-items:center;width:100%;min-height:80px;background:#05060b}.media-frame img,.media-frame video{display:block;max-width:100%;width:auto;height:auto;object-fit:contain}.media-frame video{width:100%}.card-meta{display:grid;gap:7px;padding:9px 10px}.card-line{font-size:12px;color:var(--muted)}.caption{display:none;margin:0;max-height:5.4em;overflow:hidden;font-size:12px;line-height:1.35}.app[data-captions=on] .caption{display:block}.card-actions{display:flex;flex-wrap:wrap;gap:6px;opacity:0;transition:opacity .15s}.media-card:hover .card-actions,.media-card:focus-within .card-actions{opacity:1}.card-actions button{padding:5px 7px;font-size:11px}.broken{outline:2px solid #ff4a68}
+      .media-card{position:relative;overflow:hidden;background:var(--card);border:1px solid var(--line);border-radius:17px;box-shadow:0 10px 30px #0003}.media-card:hover{background:var(--hover)}.media-frame{display:grid;place-items:center;width:100%;min-height:80px;background:#05060b center / contain no-repeat}.media-frame img,.media-frame video{display:block;max-width:100%;width:auto;height:auto;object-fit:contain}.media-frame video{width:100%}.card-meta{display:grid;gap:7px;padding:9px 10px}.card-line{font-size:12px;color:var(--muted)}.caption{display:none;margin:0;max-height:5.4em;overflow:hidden;font-size:12px;line-height:1.35}.app[data-captions=on] .caption{display:block}.card-actions{display:flex;flex-wrap:wrap;gap:6px;opacity:0;transition:opacity .15s}.media-card:hover .card-actions,.media-card:focus-within .card-actions{opacity:1}.card-actions button{padding:5px 7px;font-size:11px}.broken{outline:2px solid #ff4a68}
       .app[data-filter=image] .media-card[data-type=video],.app[data-filter=video] .media-card[data-type=image]{display:none!important}
       .app[data-layout=fit] .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--card-width,320px),1fr));gap:14px}.app[data-layout=fit][data-size=medium] .gallery{--card-width:240px}.app[data-layout=fit][data-size=huge] .gallery{--card-width:460px}.app[data-layout=fit] .media-frame img,.app[data-layout=fit] .media-frame video{max-height:72vh}
       .app[data-layout=masonry] .gallery{display:block;column-width:var(--column-width,340px);column-gap:14px}.app[data-layout=masonry][data-size=medium] .gallery{--column-width:250px}.app[data-layout=masonry][data-size=huge] .gallery{--column-width:470px}.app[data-layout=masonry] .media-card{display:inline-block;width:100%;margin:0 0 14px;break-inside:avoid}

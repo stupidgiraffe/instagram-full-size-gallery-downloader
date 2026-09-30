@@ -28,6 +28,9 @@ The result is closer to a real photo gallery than Instagram's native profile vie
 
 - Uncropped portrait and landscape media
 - Full-size image and video wall
+- Sort by profile order, newest/oldest, or largest/smallest resolution while keeping carousel slides together
+- Preserve zoom between viewer images
+- Open immediately while Instagram loads; the gallery waits for the first profile batch
 - Automatic expansion of carousel posts into separate, adjacent photo/video items
 - Fit grid, masonry, classic wall, and contact-sheet layouts
 - Full-frame or cropped contact-sheet thumbnails
@@ -232,3 +235,5 @@ Licensed under the [GNU Affero General Public License v3.0 or later](LICENSE).
 New profile sessions return Instagram’s underlying page to the top and scan down by viewport to discover rows above the launch position, including virtualized grids. The script still depends on Instagram returning the media; unavailable posts are never reported as complete.
 
 Diagnostics distinguish discovered posts from full-detail-verified posts. `moreKnown: true` means more feed posts remain; use **Load all** to continue. `incompletePosts: 0` only covers known metadata, not unseen posts. Later summaries preserve known slides, and newly discovered gaps trigger detail retrieval automatically.
+
+Sorting applies to posts and preserves each carousel’s slide order. Largest/smallest compares pixel resolution (the largest slide area in each post), not file size. Date sorting uses supplied post timestamps with numeric media IDs as a fallback. Fast scrolling keeps lazy loading for distant images while preloading nearby images and retaining available thumbnail backgrounds; browser rendering and network speed can still produce temporary gaps.

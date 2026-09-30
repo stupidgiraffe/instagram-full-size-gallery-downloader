@@ -23,6 +23,38 @@ function stack(code, id, count=6, videoAt=-1) {
 }
 const postResponse=post=>Response.json({data:{xdt_api__v1__media__shortcode__web_info:{items:[post]}}});
 const cover=code=>`<a href="/p/${code}/"><img src="https://images.cdninstagram.com/${code}-cover.jpg" width="300" height="400"></a>`;
+test('Profile data arriving after startup timeout resumes the gallery automatically',async()=>{
+ const e=environment();
+ try{e.open();await until(()=>e.test.state.autoPaused&&!e.test.state.loading);e.test.ingestPayload(timeline([photo('LATE','123')],false),e.test.detectRoute());await until(()=>e.test.state.media.length===1&&!e.test.state.loading);assert.equal(e.test.state.autoPaused,false)}finally{e.close()}
+});
+test('A multi-post feed update rebuilds gallery order only once',async()=>{
+ const posts=Array.from({length:20},(_,i)=>photo(`BATCH${i}`,String(100+i)));
+ const e=environment({boot:timeline(posts,false)});
+ try{e.open();await until(()=>!e.test.state.starting);const ui=e.test.ui();let updates=0;const sync=ui.syncViewer;ui.syncViewer=(...args)=>{updates++;sync(...args)};e.test.ingestPayload(timeline(posts.map(post=>({...post,caption:{text:'updated'}})),false),e.test.detectRoute());assert.equal(updates,1);assert.equal(e.test.state.media.length,20)}finally{e.close()}
+});
+test('Opening before profile data arrives waits, and Load all survives startup',async()=>{
+ const e=environment();
+ try{e.open();await settle();assert.equal(e.test.state.loading,true);assert.equal(e.test.state.autoPaused,false);e.root.querySelector('[data-action="load-all"]').click();e.test.ingestPayload(timeline([photo('READY','123')],false),e.test.detectRoute());await until(()=>!e.test.state.loading&&!e.test.state.loadAll&&!e.test.state.starting);assert.equal(e.test.state.media.length,1);assert.equal(e.test.state.exhausted,true);assert.equal(e.calls.length,0)}finally{e.close()}
+});
+test('Late feed order repairs cover discovery order and retains viewer selection',async()=>{
+ const e=environment({html:cover('SECOND')+cover('FIRST'),fetcher:async()=>Response.json({items:[]})});
+ try{e.open();await until(()=>!e.test.state.starting);e.root.querySelector('.card-meta').click();const selected=e.test.state.media[0].id;e.test.ingestPayload(timeline([photo('FIRST','200'),photo('SECOND','100')],false),e.test.detectRoute());assert.deepEqual(Array.from(e.test.state.media,item=>item.shortcode),['FIRST','SECOND']);assert.equal(e.test.state.media[e.test.state.lightboxIndex].id,selected);assert.deepEqual(Array.from(e.root.querySelectorAll('.media-card'),card=>card.dataset.index),['0','1'])}finally{e.close()}
+});
+test('Sort by date and resolution preserves carousel adjacency and saved choice',async()=>{
+ const first={...stack('STACK','200',3),taken_at:200};const second={...photo('SMALL','100'),taken_at:100};second.image_versions2.candidates[0].width=100;second.image_versions2.candidates[0].height=100;
+ const third={...photo('BIG','300'),taken_at:300};third.image_versions2.candidates[0].width=4000;third.image_versions2.candidates[0].height=3000;
+ const gm=new Map(),e=environment({boot:timeline([first,second,third],false),gm});
+ try{e.open();await until(()=>!e.test.state.starting);const select=e.root.querySelector('[data-setting="sort"]');const change=value=>{select.value=value;select.dispatchEvent(new e.w.Event('change',{bubbles:true}));return Array.from(e.test.state.media,item=>item.shortcode)};assert.deepEqual(change('newest'),['BIG','STACK','STACK','STACK','SMALL']);assert.deepEqual(change('oldest'),['SMALL','STACK','STACK','STACK','BIG']);assert.deepEqual(change('largest'),['BIG','STACK','STACK','STACK','SMALL']);assert.deepEqual(change('smallest'),['SMALL','STACK','STACK','STACK','BIG']);const restored=environment({gm});try{assert.equal(restored.test.state.settings.sort,'smallest')}finally{restored.close()}}finally{e.close()}
+});
+test('Zoom persists through next, previous and wrap; Reset view still resets it',async()=>{
+ const e=environment({boot:timeline([photo('ONE','100'),photo('TWO','200')],false)});
+ try{e.open();await until(()=>!e.test.state.starting);e.root.querySelector('.card-meta').click();e.root.querySelector('[data-action="zoom-in"]').click();assert.match(e.root.querySelector('.viewer-media img').style.transform,/scale\(1.25\)/);e.root.querySelector('[data-action="next"]').click();await settle();assert.match(e.root.querySelector('.viewer-media img').style.transform,/scale\(1.25\)/);e.root.querySelector('[data-action="next"]').click();await settle();assert.match(e.root.querySelector('.viewer-media img').style.transform,/scale\(1.25\)/);e.root.querySelector('[data-action="prev"]').click();await settle();assert.match(e.root.querySelector('.viewer-media img').style.transform,/scale\(1.25\)/);e.root.querySelector('[data-action="fit"]').click();assert.match(e.root.querySelector('.viewer-media img').style.transform,/scale\(1\)/)}finally{e.close()}
+});
+test('Cards reserve image geometry and show thumbnails without eagerly loading the entire gallery',async()=>{
+ const posts=Array.from({length:20},(_,i)=>photo(`PHOTO${i}`,String(100+i)));posts[0].image_versions2.candidates.push({url:'https://images.cdninstagram.com/tiny.jpg',width:100,height:125});
+ const e=environment({boot:timeline(posts,false)});
+ try{e.open();await until(()=>!e.test.state.starting);const images=Array.from(e.root.querySelectorAll('.media-frame img'));assert.equal(images.filter(image=>image.loading==='eager').length,8);assert.equal(images.filter(image=>image.loading==='lazy').length,12);const frame=e.root.querySelector('.media-frame');assert(frame.style.aspectRatio);assert.match(frame.style.backgroundImage,/tiny.jpg/)}finally{e.close()}
+});
 test('A later short summary cannot remove already retrieved carousel slides',async()=>{
  const full=stack('KEEP','123');delete full.carousel_media_count;
  const e=environment({html:cover('KEEP'),fetcher:async()=>postResponse(full)});
@@ -125,9 +157,9 @@ function environment({script=source,boot=null,html='',gm=new Map(),local=new Map
  };
  w.scrollTo=()=>{};
  w.HTMLElement.prototype.scrollTo=function({top}){this.scrollTop=top};
- w.IntersectionObserver=class{constructor(fn){this.fn=fn}observe(){}disconnect(){}};
+ w.IntersectionObserver=class{constructor(fn){this.fn=fn}observe(){}unobserve(){}disconnect(){}};
  let code=script;
- if(instrument && code.includes('  installResponseCapture();')) code=code.replace('  installResponseCapture();', '  win.__test = {state, native, ui:()=>ui, detectRoute, resetSession, startSession, fetchPage, loadNextPage, scanPageData, scanVisibleMedia, ingestPayload, extractPage, saveSettings, setSourceWithFallback, normalizeMediaUrl, diagnosticReport, downloadEntry};\n  installResponseCapture();');
+ if(instrument && code.includes('  installResponseCapture();')) code=code.replace('  installResponseCapture();', '  win.__test = {state, native, ui:()=>ui, detectRoute, resetSession, startSession, fetchPage, loadNextPage, scanPageData, scanVisibleMedia, ingestPayload, saveSettings, setSourceWithFallback, normalizeMediaUrl, diagnosticReport, downloadEntry};\n  installResponseCapture();');
  w.eval(code);
  w.document.dispatchEvent(new w.Event('DOMContentLoaded'));
  const root=w.document.getElementById('ig-full-size-gallery-host').shadowRoot;
@@ -262,7 +294,7 @@ test('Native scroll supplies the second page without constructing an endpoint',a
 });
 test('No progress pauses autoload and permits explicit retry instead of marking end',async()=>{
  const e=environment();
- try{e.open();await new Promise(resolve=>setTimeout(resolve,100));assert.equal(e.test.state.loading,false);assert.equal(e.test.state.autoPaused,true);assert.equal(e.test.state.exhausted,false);assert.equal(e.calls.length,0);e.test.ingestPayload(timeline([photo('A','101')],false),e.test.detectRoute());await e.test.loadNextPage();assert.equal(e.test.state.media.length,1);assert.equal(e.test.state.autoPaused,false)}finally{e.close()}
+ try{e.open();await until(()=>e.test.state.autoPaused);assert.equal(e.test.state.loading,false);assert.equal(e.test.state.autoPaused,true);assert.equal(e.test.state.exhausted,false);assert.equal(e.calls.length,0);e.test.ingestPayload(timeline([photo('A','101')],false),e.test.detectRoute());await e.test.loadNextPage();assert.equal(e.test.state.media.length,1);assert.equal(e.test.state.autoPaused,false)}finally{e.close()}
 });
 test('Late profile responses are discarded after SPA navigation',async()=>{
  let resolve;const e=environment({fetcher:()=>new Promise(r=>resolve=r)});
@@ -303,9 +335,7 @@ test('Reset from userscript menu restores the persisted controls setting in the 
  const e=environment({gm:new Map([[key,JSON.stringify({hideViewerControls:true})]])});
  try{assert.equal(e.root.querySelector('.lightbox').classList.contains('controls-hidden'),true);e.menus.get('Reset gallery settings')();assert.equal(e.root.querySelector('.lightbox').classList.contains('controls-hidden'),false);assert.equal(JSON.parse(e.gm.get(key)).hideViewerControls,false)}finally{e.close()}
 });
-test('REST and GraphQL extraction preserve pagination flags',async()=>{
- const e=environment();try{assert.equal(e.test.extractPage(timeline([photo('A','101')])).cursor,'next123');assert.equal(e.test.extractPage(timeline([photo('A','101')],false)).more,false);assert.equal(e.test.extractPage({items:[],next_max_id:'abc',more_available:false}).more,false)}finally{e.close()}
-});
+
 test('Card preview opens the viewer with the same signed source and saved footer state',async()=>{
  const item=photo('VIEW','101');const e=environment({boot:timeline([item],false),gm:new Map([[key,JSON.stringify({hideViewerControls:true})]])});
  try{e.open();await settle();e.root.querySelector('.media-frame img').click();assert.equal(e.root.querySelector('.lightbox').classList.contains('hidden'),false);assert.equal(e.root.querySelector('.viewer-media img').src,item.image_versions2.candidates[0].url);assert.equal(e.root.querySelector('.lightbox').classList.contains('controls-hidden'),true);e.root.querySelector('[data-action="viewer-close"]').click();assert.equal(e.root.querySelector('.lightbox').classList.contains('hidden'),true)}finally{e.close()}
