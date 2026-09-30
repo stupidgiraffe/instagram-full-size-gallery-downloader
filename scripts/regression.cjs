@@ -53,7 +53,7 @@ test('Zoom persists through next, previous and wrap; Reset view still resets it'
 test('Cards reserve image geometry and show thumbnails without eagerly loading the entire gallery',async()=>{
  const posts=Array.from({length:20},(_,i)=>photo(`PHOTO${i}`,String(100+i)));posts[0].image_versions2.candidates.push({url:'https://images.cdninstagram.com/tiny.jpg',width:100,height:125});
  const e=environment({boot:timeline(posts,false)});
- try{e.open();await until(()=>!e.test.state.starting);const images=Array.from(e.root.querySelectorAll('.media-frame img'));assert.equal(images.filter(image=>image.loading==='eager').length,8);assert.equal(images.filter(image=>image.loading==='lazy').length,12);const frame=e.root.querySelector('.media-frame');assert(frame.style.aspectRatio);assert.match(frame.style.backgroundImage,/tiny.jpg/)}finally{e.close()}
+ try{e.open();await until(()=>!e.test.state.starting);const images=Array.from(e.root.querySelectorAll('.media-frame img'));assert.equal(images.filter(image=>image.loading==='eager').length,8);assert.equal(images.filter(image=>image.loading==='lazy').length,12);const frame=e.root.querySelector('.media-frame');assert(frame.style.aspectRatio);assert.match(frame.style.backgroundImage,/tiny.jpg/);assert.equal(e.root.querySelectorAll('.media-frame')[1].style.backgroundImage,'')}finally{e.close()}
 });
 test('A later short summary cannot remove already retrieved carousel slides',async()=>{
  const full=stack('KEEP','123');delete full.carousel_media_count;

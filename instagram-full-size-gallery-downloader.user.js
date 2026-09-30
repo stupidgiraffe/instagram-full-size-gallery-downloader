@@ -1049,7 +1049,10 @@
           posterUrl: posterSources[0]?.url || '', shortcode, username, caption,
           postUrl: shortcode ? `https://www.instagram.com/p/${shortcode}/` : location.href,
           carouselIndex: index, carouselTotal: shape.expected || (shape.complete ? children.length : 0),
-          previewUrl: (imageCandidates(child).at(-1) || imageCandidates(parent).at(-1))?.url || '',
+          previewUrl: (() => {
+            const thumbnail = imageCandidates(child).at(-1) || imageCandidates(parent).at(-1);
+            return thumbnail && (type === 'video' || thumbnail.url !== sources[0].url) ? thumbnail.url : '';
+          })(),
           width: sources[0].width || Number(child.original_width || child.width || child.dimensions?.width || 0),
           height: sources[0].height || Number(child.original_height || child.height || child.dimensions?.height || 0),
         });
