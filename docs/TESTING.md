@@ -95,3 +95,14 @@ Automated fixtures cover prefixed JSON, newline-delimited nested post data, mana
 - Verify a collaborative post whose primary author differs from the profile, including when GraphQL fails and media-info succeeds.
 - Confirm transient failures retry automatically; closing or navigating cancels backoff. Persistent unavailable posts remain visibly incomplete.
 - Automated tests cover these scenarios with fixtures; authenticated Instagram verification is still required.
+
+### Silent carousel loss (2.1.10)
+
+Regression fixtures verify six retrieved slides survive a later two-slide summary; conflicting totals trigger retrieval; duplicate IDs cannot satisfy completeness; and new missing-slide evidence automatically reopens a completed detail job. Live checks should compare a specific native post's ordered slides with the gallery. Clean error counters alone are not proof of profile coverage, especially with moreKnown=true.
+
+### Startup and browsing (2.1.11)
+
+- Open on a freshly navigated profile before the first grid appears; click Load all while waiting. Verify the first batch appears and later feed data corrects cover order.
+- Change every sort mode, reopen the gallery, and verify saved choice, carousel adjacency, and viewer selection. Resolution sorting groups posts by the largest available slide pixel area.
+- Zoom, navigate next/previous, and wrap at the end; check the same scale on the next image, centered pan, and functioning Reset view.
+- Fling through a large profile in a real browser and inspect thumbnail visibility, reserved card geometry, network requests, and memory. Automated DOM fixtures verify policy; they do not measure compositor smoothness.

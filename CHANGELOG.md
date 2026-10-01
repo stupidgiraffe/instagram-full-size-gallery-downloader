@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.11] - 2026-09-30
+
+### Changed
+
+- Wait for initial profile media before starting the scroll sweep. Load all waits for startup, and late profile data automatically resumes a timed-out empty session.
+- Use captured feed order to correct early cover discovery order while retaining the selected viewer item.
+- Add persisted Profile order, Newest first, Oldest first, Largest resolution, and Smallest resolution sorting. Sort posts as groups so carousel slides remain adjacent and ordered. Resolution means the largest available pixel area within each post, not download file size.
+- Preserve zoom scale through next/previous navigation and end wrapping, recentering each new image. Reset view and opening a new viewer still start at fit size.
+- Reserve known image geometry, retain thumbnail backgrounds, and load images within 1600px of the gallery viewport sooner. Keep distant images lazy; only the first eight load eagerly on creation.
+- Batch captured feed updates into one gallery reconciliation. Centralize ordering and page scanning; remove unused pagination extraction and state fields. Disconnect thumbnail observation on gallery close and card disposal.
+
+### Validation
+
+- 53 regression tests pass, including immediate startup/Load all, late data recovery, feed-order correction, all sort modes/persistence, retained zoom, thumbnail geometry/loading policy, and one-rebuild-per-response batching.
+- Authenticated Instagram behavior and fast-scroll visual smoothness still require live browser verification.
+
+## [2.1.10] - 2026-09-27
+
+### Fixed
+
+- Preserve the largest known carousel size and previously retrieved slides when later summaries report fewer items, including full-detail responses with no declared total.
+- Reconcile competing count fields using the largest value. Count unique slide IDs, so duplicated records cannot hide a missing slide.
+- Reopen successful detail jobs automatically when new metadata reveals missing slides, including after feed exhaustion. Existing rate-limit pauses and bounded failure retries remain in force.
+- Keep inferred minimum slide counts separate from declared totals so repeatedly merging an unknown-count summary does not falsely verify it.
+- Add discoveredPosts, detailVerifiedPosts, profileScanPending, and feedEndObserved diagnostics to distinguish known-post completeness from profile coverage.
+
+### Validation
+
+- Four new regressions fail against v2.1.9 and pass after these changes; all 47 tests pass.
+- The supplied run still had moreKnown=true. Its clean error counters do not establish full-profile coverage or identify which reproduced defect occurred in that session. Authenticated live verification remains pending.
+
 ## [2.1.9] - 2026-09-16
 
 ### Fixed
