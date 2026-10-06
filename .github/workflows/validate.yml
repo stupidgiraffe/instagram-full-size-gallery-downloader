@@ -31,3 +31,11 @@ jobs:
 
       - name: Run behavioral regressions
         run: node scripts/regression.cjs
+
+      - name: Install Chromium for browser verification
+        run: npx playwright install --with-deps chromium --only-shell
+
+      - name: Run browser smoke test
+        run: |
+          npm run test:browser
+          IG_BROWSER_POSTS=216 npm run test:browser

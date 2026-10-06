@@ -13,7 +13,7 @@
 // @compatible   brave
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
-// @version      2.1.11
+// @version      2.2.0
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -71,7 +71,6 @@
     generation: 0,
     mode: 'profile',
     username: '',
-    nextCursor: null,
     hasMore: false,
     exhausted: false,
     loading: false,
@@ -84,8 +83,9 @@
     lightboxIndex: -1,
     starting: false,
     autoPaused: false,
+    userPaused: false,
     nativeConsumed: new Map(),
-    nativeStep: 0,
+    autoTimer: null,
     mediaById: new Map(),
     postGroups: new Map(),
     detailJobs: new Map(),
@@ -95,8 +95,6 @@
       images: 0,
       videos: 0,
       carousels: 0,
-      ads: 0,
-      duplicates: 0,
       failures: 0,
     },
   };
@@ -234,11 +232,12 @@
     };
   }
 
-  const VERSION = '2.1.11';
+  const VERSION = '2.2.0';
   const POST_QUERY_ID = '27128499623469141';
   const native = {
-    key: '', items: new Map(), profileCodes: new Set(), profileOrder: new Map(), pendingUpdates: null, scripts: new WeakSet(), sequence: 0,
-    pageInfo: null, requests: 0, responses: 0, errors: [], hooks: [],
+    key: '', items: new Map(), profileCodes: new Set(), profileOrder: new Map(), pendingUpdates: null, scripts: new WeakSet(),
+    pageInfo: null, feedPages: new Map(), request: null, userId: '', expectedPosts: null,
+    replayRequests: 0, replayPages: 0, requests: 0, responses: 0, errors: [], hooks: [],
   };
   const originalFetch = typeof win.fetch === 'function' ? win.fetch.bind(win) : null;
   const refreshRequests = new Map();
@@ -252,7 +251,12 @@
       native.profileOrder.clear();
       native.scripts = new WeakSet();
       native.pageInfo = null;
-      native.sequence = 0;
+      native.feedPages.clear();
+      native.request = null;
+      native.userId = '';
+      native.expectedPosts = null;
+      native.replayRequests = 0;
+      native.replayPages = 0;
     }
     return native;
   }
@@ -271,6 +275,7 @@
     return Boolean(value && (value.code || value.shortcode || value.pk || value.id) && (
       value.image_versions2 || value.display_url || value.video_versions || value.video_url
       || value.carousel_media || value.edge_sidecar_to_children || value.carousel_media_items
+      || value.display_uri || value.media_type
     ));
   }
 
@@ -318,7 +323,19 @@
       user: incoming.user || incoming.owner || previous.user || previous.owner };
     const useIncoming = after.children.length > before.children.length
       || (after.children.length === before.children.length && (!before.complete || after.complete));
-    const children = useIncoming ? after.children : before.children;
+    let children = useIncoming ? after.children : before.children;
+    // Partial responses can contain different slides, not just a shorter prefix.
+    // Keep stable identities in their known order; update sources in place.
+    if (before.children.length && after.children.length && !after.complete
+        && before.children.every(child => child.pk || child.id) && after.children.every(child => child.pk || child.id)) {
+      const incomingById = new Map(after.children.map(child => [String(child.pk || child.id).split('_')[0], child]));
+      const seen = new Set();
+      children = before.children.map(child => {
+        const id = String(child.pk || child.id).split('_')[0]; seen.add(id);
+        return incomingById.has(id) ? { ...child, ...incomingById.get(id) } : child;
+      });
+      children.push(...after.children.filter(child => !seen.has(String(child.pk || child.id).split('_')[0])));
+    }
     delete merged.carousel_media;
     delete merged.carousel_media_items;
     delete merged.edge_sidecar_to_children;
@@ -330,7 +347,7 @@
     return merged;
   }
 
-  function cacheMedia(media, route, source) {
+  function cacheMedia(media, route) {
     if (detectRoute().key !== route.key) return;
     const cache = routeCache(route);
     const key = postKey(media);
@@ -339,10 +356,8 @@
     media = mergePostMedia(previous?.media, media);
     const signature = mediaSignature(media);
     if (previous?.signature === signature) return;
-    cache.items.set(key, { media, signature, source });
-    cache.sequence += 1;
-    if (cache.items.size > 600) cache.items.delete(cache.items.keys().next().value);
-    if (state.opened && state.routeKey === route.key && state.postGroups.has(key)) {
+    cache.items.set(key, { media, signature });
+    if (state.opened && state.routeKey === route.key && state.postGroups.size) {
       if (native.pendingUpdates) { native.pendingUpdates.set(key, media); return; }
       appendRawMedia([media]);
       state.nativeConsumed.set(key, signature);
@@ -442,7 +457,7 @@
           throw new Error(errors.length ? `GraphQL returned ${errors.length} error(s)${codes.length ? ` (${codes.join(', ')})` : ''}` : 'Response contained no matching post');
         }
         // detailMedia has already verified the requested post identity. A profile can contain another author's collaborative post.
-        cacheMedia({ ...media, code: code || media.code, __preview: false, __fullDetails: true }, route, 'post details');
+        cacheMedia({ ...media, code: code || media.code, __preview: false, __fullDetails: true }, route);
         const result = native.items.get(key)?.media;
         if (result && postShape(result).complete) return result;
         const incomplete = new Error('Matching post is missing full slide sources');
@@ -557,45 +572,112 @@
     throw error;
   }
 
-  function ingestPayload(value, route, source = 'network') {
+  function profileRequestMatch(context, route) {
+    if (!context) return null;
+    const username = context.variables?.username || context.variables?.data?.username;
+    if (username) return String(username).toLowerCase() === route.username.toLowerCase();
+    const url = new URL(context.url);
+    const target = url.pathname.match(/\/feed\/user\/(?:username\/)?([^/]+)/)?.[1];
+    if (target && !/^\d+$/.test(target)) return target.toLowerCase() === route.username.toLowerCase();
+    const id = target || context.variables?.id || context.variables?.user_id;
+    return id && native.userId ? String(id) === native.userId : null;
+  }
+
+  function rebuildFeedOrder() {
+    const order = new Map(), visited = new Set();
+    let cursor = '', page = native.feedPages.get(cursor), info = null;
+    while (page && !visited.has(cursor)) {
+      visited.add(cursor);
+      for (const key of page.codes) if (!order.has(key)) order.set(key, order.size);
+      info = { more: page.more, cursor: page.cursor, rooted: true };
+      if (!page.more) break;
+      if (!page.cursor || visited.has(page.cursor)) { info.stalled = true; break; }
+      cursor = page.cursor;
+      page = native.feedPages.get(cursor);
+    }
+    native.profileOrder = order;
+    native.pageInfo = info || { more: true, cursor: null, rooted: false };
+  }
+
+  function recordFeedPage(items, info, route, source, context) {
+    for (const media of items) {
+      const key = postKey(media);
+      if (!key || isAd(media)) continue;
+      if (media.code || media.shortcode) native.profileCodes.add(String(media.code || media.shortcode));
+      cacheMedia(media.display_uri && !media.display_url && !media.image_versions2 && !media.carousel_media
+        ? { ...media, __preview: true, display_url: media.display_uri } : media, route);
+    }
+    if (typeof info.more !== 'boolean') return false;
+    // An observed request identifies which page this response belongs to. A
+    // response from a later cursor cannot prove that earlier pages were read.
+    const cursor = context?.cursorKnown ? context.cursor || ''
+      : source === 'page data' ? '' : native.pageInfo?.more ? native.pageInfo.cursor || '' : '';
+    const previous = native.feedPages.get(cursor);
+    const currentCodes = items.filter(media => !isAd(media)).map(postKey).filter(Boolean);
+    const staleBoot = source === 'page data' && previous?.source === 'network';
+    const codes = [...new Set(staleBoot ? [...previous.codes, ...currentCodes] : [...currentCodes, ...(previous?.codes || [])])];
+    native.feedPages.set(cursor, staleBoot
+      ? { ...previous, codes } : { codes, more: info.more, cursor: info.cursor || null, source });
+    if (context?.replayable && profileRequestMatch(context, route) !== false) native.request = context;
+    rebuildFeedOrder();
+    return true;
+  }
+
+  function ingestPayload(value, route, source = 'network', context = null) {
     if (detectRoute().key !== route.key) return;
     routeCache(route);
     const visited = new WeakSet();
     let remaining = 24000;
-    function walk(node, path = '', depth = 0, inFeed = false) {
+    let feedAccepted = false;
+    function walk(node, path = '', depth = 0, inFeed = false, profileOwner = false) {
       if (!node || depth > 45 || --remaining < 0) return;
       if (typeof node === 'string') {
         if (node.length < 4_000_000 && /^[\[{]/.test(node.trim()) && /image_versions2|display_url|carousel_media/.test(node)) {
-          for (const parsed of parsePayload(node)) walk(parsed, path, depth + 1, inFeed);
+          for (const parsed of parsePayload(node)) walk(parsed, path, depth + 1, inFeed, profileOwner);
         }
         return;
       }
       if (typeof node !== 'object' || visited.has(node)) return;
       visited.add(node);
-      const feed = inFeed || /timeline|usertags|tagged|edge_owner_to_timeline_media/.test(path);
-      const eligible = items => source === 'network' || items.some(item => mediaMatchesRoute(item.node || item.media || item, route));
-      if (node.page_info && Array.isArray(node.edges) && feed && eligible(node.edges)) {
-        for (const edge of node.edges) {
-          const media = edge.node?.media || edge.node;
-          if (mediaMatchesRoute(media, route) && !native.profileOrder.has(postKey(media))) native.profileOrder.set(postKey(media), native.profileOrder.size);
-        }
-        const info = node.page_info;
-        if (typeof info.has_next_page === 'boolean' && (source === 'network' || native.pageInfo === null)) native.pageInfo = { more: info.has_next_page, cursor: info.end_cursor || null };
+      const owner = String(node.username || '').toLowerCase() === route.username.toLowerCase() && Boolean(route.username);
+      if (owner) {
+        native.userId = String(node.pk || node.id || native.userId);
+        const count = Number(node.media_count ?? node.edge_owner_to_timeline_media?.count);
+        if (Number.isSafeInteger(count) && count >= 0) native.expectedPosts = count;
       }
-      if (typeof node.more_available === 'boolean' && (Array.isArray(node.items) || Array.isArray(node.feed_items)) && eligible(node.items || node.feed_items)) {
-        for (const item of node.items || node.feed_items) {
-          const media = item.media || item.media_or_ad || item;
-          if (mediaMatchesRoute(media, route) && !native.profileOrder.has(postKey(media))) native.profileOrder.set(postKey(media), native.profileOrder.size);
-        }
-        if (source === 'network' || native.pageInfo === null) native.pageInfo = { more: node.more_available, cursor: node.next_max_id || null };
+      const feed = inFeed || /timeline|usertags|tagged|polaris_ordered_timeline|edge_owner_to_timeline_media/.test(path);
+      const items = Array.isArray(node.edges) ? node.edges.map(edge => edge.node?.media || edge.node).filter(Boolean)
+        : (node.items || node.feed_items || []).map?.(item => item.media || item.media_or_ad || item) || [];
+      const profileConnection = /(?:user_timeline_graphql_connection|polaris_ordered_timeline_connection|edge_owner_to_timeline_media)$/.test(path);
+      const restFeed = /\/api\/v1\/feed\/user\//.test(context?.url || '');
+      const connection = node.page_info && Array.isArray(node.edges) && feed;
+      const rest = typeof node.more_available === 'boolean' && (Array.isArray(node.items) || Array.isArray(node.feed_items));
+      if (route.mode === 'profile' && (connection || rest)) {
+        const match = profileRequestMatch(context, route);
+        const eligible = match !== false && (match === true || profileOwner || owner || items.some(media => mediaMatchesRoute(media, route)));
+        // Tagged/reels/suggestions/detail connections must not mutate the
+        // profile's membership, order, cursor, or terminal state.
+        if (!eligible || !(profileConnection || restFeed)) return;
+        const count = Number(node.count);
+        if (/edge_owner_to_timeline_media$/.test(path) && node.count != null && Number.isSafeInteger(count) && count >= 0) native.expectedPosts = count;
+        feedAccepted = recordFeedPage(items, node.page_info
+          ? { more: node.page_info.has_next_page, cursor: node.page_info.end_cursor }
+          : { more: node.more_available, cursor: node.next_max_id }, route, source, context) || feedAccepted;
+        return;
+      }
+      if (route.mode !== 'profile' && (connection || rest) && (source === 'network' || items.some(media => mediaMatchesRoute(media, route)))) {
+        for (const media of items) if (mediaMatchesRoute(media, route)) cacheMedia(media, route);
+        const info = node.page_info;
+        native.pageInfo = info ? { more: info.has_next_page, cursor: info.end_cursor || null }
+          : { more: node.more_available, cursor: node.next_max_id || null };
       }
       if (isMediaNode(node)) {
-        if (mediaMatchesRoute(node, route) && (route.mode !== 'tagged' || feed || source === 'network')) cacheMedia(node, route, source);
+        if (mediaMatchesRoute(node, route) && (route.mode !== 'tagged' || feed || source === 'network')) cacheMedia(node, route);
         return;
       }
       for (const [key, child] of Object.entries(node)) {
         if (/suggested|recommend|chaining|reels_tray/.test(key)) continue;
-        walk(child, `${path}.${key}`, depth + 1, feed);
+        walk(child, `${path}.${key}`, depth + 1, feed, profileOwner || owner);
       }
     }
     const updates = new Map();
@@ -606,9 +688,21 @@
         appendRawMedia([...updates.values()]);
         for (const key of updates.keys()) state.nativeConsumed.set(key, native.items.get(key)?.signature);
         Promise.resolve().then(resumeUnfinishedDetails);
-      } else orderGallery();
+      } else if (feedAccepted) orderGallery();
     }
     if (state.opened && !state.postGroups.size && state.autoPaused && native.items.size) Promise.resolve().then(resumeUnfinishedDetails);
+    if (state.opened && !state.loading && state.profilePrepared && feedAccepted) {
+      if (native.request) state.profileSweep = false;
+      state.hasMore = state.profileSweep || native.pageInfo?.more !== false || coverageGap() > 0 || pendingNativeItems().length > 0;
+      state.exhausted = !state.hasMore;
+      if (state.autoPaused && !state.userPaused && state.settings.autoLoad) {
+        state.autoPaused = false;
+        scheduleAutoLoad();
+      }
+      if (state.exhausted && !incompletePosts().length) ui?.setStatus(`Loaded ${state.media.length} media items — end reached.`);
+      ui?.refresh();
+    }
+    return feedAccepted;
   }
 
   function scanPageData(route = detectRoute()) {
@@ -685,14 +779,14 @@
         ? { is_video: true, video_url: current, image_versions2: { candidates: element.poster ? [{ url: normalizeMediaUrl(element.poster) }] : [] } }
         : { image_versions2: { candidates } });
     }
-    for (const media of groups.values()) cacheMedia(media, route, 'visible page');
+    if (groups.size) ingestPayload([...groups.values()], route, 'visible page');
   }
 
   function observedEndpoint(input) {
     try {
       const url = new URL(typeof input === 'string' ? input : input.url, location.href);
       if (!['www.instagram.com', 'instagram.com', 'i.instagram.com'].includes(url.hostname)) return null;
-      if (!/^\/(?:graphql\/query\/?|api\/graphql\/?|api\/v1\/(?:feed\/(?:user\/|timeline\/)|usertags\/|media\/[^/]+\/info\/))/.test(url.pathname)) return null;
+      if (!/^\/(?:graphql\/query\/?|api\/graphql\/?|api\/v1\/(?:feed\/(?:user\/|timeline\/)|usertags\/|users\/(?:web_profile_info\/|[^/]+\/info\/)|media\/[^/]+\/info\/))/.test(url.pathname)) return null;
       return url;
     } catch (_) { return null; }
   }
@@ -702,6 +796,43 @@
     if (native.errors.length > 8) native.errors.shift();
   }
 
+  function describeRequest(url, method = 'GET', body = null, suppliedHeaders = {}) {
+    const result = { url: url.href, method: String(method).toUpperCase(), headers: {}, variables: null,
+      form: null, cursor: null, cursorKnown: false, replayable: false };
+    try {
+      const entries = typeof suppliedHeaders.forEach === 'function'
+        ? (() => { const values = []; suppliedHeaders.forEach((value, key) => values.push([key, value])); return values; })()
+        : Array.isArray(suppliedHeaders) ? suppliedHeaders : Object.entries(suppliedHeaders || {});
+      for (const [key, value] of entries) if (/^(?:content-type|x-ig-app-id|x-asbd-id|x-requested-with|x-csrftoken|x-ig-www-claim|x-fb-lsd|x-fb-friendly-name)$/i.test(key)) result.headers[key] = String(value);
+      if (/\/api\/v1\/feed\/user\//.test(url.pathname) && result.method === 'GET') {
+        result.cursor = url.searchParams.get('max_id');
+        result.cursorKnown = result.replayable = true;
+        result.cursorField = 'max_id';
+      } else {
+        const params = result.method === 'GET' ? url.searchParams : new URLSearchParams(typeof body === 'string' ? body : body?.toString() || '');
+        result.variables = JSON.parse(params.get('variables') || 'null');
+        if (result.variables && typeof result.variables === 'object' && !Array.isArray(result.variables)) {
+          result.form = params.toString();
+          result.cursorField = Object.hasOwn(result.variables, 'max_id') ? 'max_id'
+            : Object.hasOwn(result.variables.data || {}, 'max_id') ? 'data.max_id' : 'after';
+          result.cursor = result.cursorField === 'data.max_id' ? result.variables.data.max_id : result.variables[result.cursorField];
+          result.cursorKnown = Object.hasOwn(result.variables, result.cursorField)
+            || result.cursorField === 'data.max_id' || Object.hasOwn(result.variables, 'first') || Boolean(result.variables.data?.count);
+          result.replayable = result.cursorKnown && Boolean(params.get('doc_id') || params.get('query_hash'));
+        }
+      }
+    } catch (_) {}
+    return result;
+  }
+
+  async function fetchRequestContext(input, options, url) {
+    try {
+      const method = options?.method || input?.method || 'GET';
+      const body = options?.body ?? (typeof input?.clone === 'function' && method.toUpperCase() !== 'GET' ? await input.clone().text() : null);
+      return describeRequest(url, method, body, options?.headers || input?.headers);
+    } catch (_) { return describeRequest(url); }
+  }
+
   function installResponseCapture() {
     const expose = fn => typeof exportFunction === 'function' ? exportFunction(fn, win, { allowCrossOriginArguments: true }) : fn;
     if (originalFetch) {
@@ -709,15 +840,16 @@
         win.fetch = expose(function (...args) {
           const url = observedEndpoint(args[0]);
           const route = detectRoute();
+          const context = url ? fetchRequestContext(args[0], args[1], url) : null;
           if (url) native.requests += 1;
           return originalFetch(...args).then(response => {
             if (url && detectRoute().key === route.key) {
               if (response.ok) {
                 try {
-                  response.clone().text().then(text => {
+                  Promise.all([response.clone().text(), context]).then(([text, request]) => {
                     if (detectRoute().key !== route.key) return;
                     native.responses += 1;
-                    for (const value of parsePayload(text)) ingestPayload(value, route);
+                    for (const value of parsePayload(text)) ingestPayload(value, route, 'network', request);
                   }).catch(() => {});
                 } catch (_) {}
               } else recordNativeFailure(url, response.status);
@@ -733,14 +865,21 @@
       if (!proto) return;
       const open = proto.open;
       const send = proto.send;
+      const setRequestHeader = proto.setRequestHeader;
       const contexts = new WeakMap();
       proto.open = expose(function (method, url, ...rest) {
-        contexts.set(this, { url: observedEndpoint(String(url)), route: detectRoute() });
+        contexts.set(this, { url: observedEndpoint(String(url)), route: detectRoute(), method, headers: {} });
         return open.call(this, method, url, ...rest);
+      });
+      if (setRequestHeader) proto.setRequestHeader = expose(function (key, value) {
+        const context = contexts.get(this);
+        if (context?.url) context.headers[key] = value;
+        return setRequestHeader.call(this, key, value);
       });
       proto.send = expose(function (...args) {
         const context = contexts.get(this);
         if (context?.url) {
+          const request = describeRequest(context.url, context.method, args[0], context.headers);
           native.requests += 1;
           this.addEventListener('load', () => {
             if (detectRoute().key !== context.route.key) return;
@@ -748,7 +887,7 @@
             try {
               native.responses += 1;
               const values = this.responseType === 'json' ? [this.response] : parsePayload(this.responseText);
-              for (const value of values) ingestPayload(value, context.route);
+              for (const value of values) ingestPayload(value, context.route, 'network', request);
             } catch (_) {}
           }, { once: true });
         }
@@ -773,11 +912,53 @@
     for (const [key, value] of pending) state.nativeConsumed.set(key, value.signature);
     return {
       items: pending.map(([, value]) => value.media),
-      next_max_id: `native:${++state.nativeStep}`,
-      more_available: state.profileSweep || native.pageInfo?.more !== false,
-      __native: true, __waiting: waiting && !pending.length,
-      __preview: pending.some(([, value]) => value.media.__preview),
+      more_available: state.profileSweep || native.pageInfo?.more !== false || coverageGap() > 0,
+      __waiting: waiting && !pending.length,
     };
+  }
+
+  function coverageGap() {
+    return state.mode === 'profile' && native.expectedPosts != null
+      ? Math.max(0, native.expectedPosts - native.profileCodes.size) : 0;
+  }
+
+  async function fetchCapturedPage(cursor, generation, route, signal) {
+    const template = native.request;
+    const url = new URL(template.url);
+    let body;
+    if (template.variables) {
+      const variables = { ...template.variables };
+      if (template.cursorField === 'data.max_id') variables.data = { ...variables.data, max_id: cursor };
+      else variables[template.cursorField] = cursor;
+      const params = new URLSearchParams(template.form);
+      params.set('variables', JSON.stringify(variables));
+      if (template.method === 'GET') url.search = params.toString();
+      else body = params.toString();
+    } else if (cursor) url.searchParams.set('max_id', cursor);
+    else url.searchParams.delete('max_id');
+    const context = describeRequest(url, template.method, body, template.headers);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      checkSession(generation, route, signal);
+      try {
+        native.replayRequests += 1;
+        const json = await requestPostJson(url.href, { method: template.method, body,
+          headers: { ...headers(), ...template.headers } }, signal);
+        checkSession(generation, route, signal);
+        if (json?.status === 'fail') {
+          const error = new Error(json.message || 'Instagram rejected the profile request');
+          if (/login|challenge|checkpoint/i.test(error.message)) error.status = 401;
+          if (/rate.limit|please wait|few minutes|throttl/i.test(error.message)) error.status = 429;
+          throw error;
+        }
+        if (!ingestPayload(json, route, 'network', context)) throw new Error('Instagram returned no matching profile page. Coverage is incomplete.');
+        native.replayPages += 1;
+        return;
+      } catch (error) {
+        if (signal.aborted || error?.name === 'AbortError' || [401, 403, 429].includes(error.status)) throw error;
+        if (attempt === 2 || !(error.responseFormat || error.status >= 500 || /network|fetch|timed out/i.test(error.message || ''))) throw error;
+        await waitForRecovery(attempt === 0 ? 1000 : 4000, signal);
+      }
+    }
   }
 
   function scrollInstagram(position = 'bottom') {
@@ -797,25 +978,33 @@
     return top >= Math.max(0, target.scrollHeight - target.clientHeight);
   }
 
-  async function fetchPage(_cursor, signal) {
+  async function fetchPage(signal) {
     const generation = state.generation;
     const route = detectRoute();
     checkSession(generation, route, signal);
     if (route.mode === 'profile' && !state.profilePrepared) {
       await waitForProfileReady(generation, route, signal);
-      state.profileSweep = !scrollInstagram('top');
+      state.profileSweep = native.request ? false : !scrollInstagram('top');
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       checkSession(generation, route, signal);
       state.profilePrepared = true;
     }
     scanAvailableMedia(route);
-    if (pendingNativeItems().length || (!state.profileSweep && native.pageInfo?.more === false)) return takeNativePage();
+    if (native.request) state.profileSweep = false;
+    if (pendingNativeItems().length) return takeNativePage();
+    if (!state.profileSweep && native.pageInfo?.more === false) return takeNativePage(coverageGap() > 0);
     if (route.mode === 'post') return takeNativePage(true);
+    if (route.mode === 'profile' && native.request) {
+      state.profileSweep = false;
+      ui.setStatus(native.pageInfo?.rooted ? 'Loading the next profile page…' : 'Recovering the profile from its first page…');
+      await fetchCapturedPage(native.pageInfo?.cursor || null, generation, route, signal);
+      return { ...takeNativePage(Boolean(native.pageInfo?.stalled)), __pageFetched: true };
+    }
     ui.setStatus('Waiting for Instagram to load the next posts…');
     if (scrollInstagram()) state.profileSweep = false;
     const until = Date.now() + 6500;
     while (Date.now() < until) {
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await waitForRecovery(200, signal);
       checkSession(generation, route, signal);
       scanAvailableMedia(route);
       if (pendingNativeItems().length || (!state.profileSweep && native.pageInfo?.more === false)) return takeNativePage();
@@ -824,14 +1013,29 @@
     return takeNativePage(true);
   }
 
+  function scheduleAutoLoad() {
+    if (state.autoTimer != null || !state.opened || state.loading || state.autoPaused || state.userPaused || state.loadAll
+        || state.exhausted || !state.settings.autoLoad || (state.mode !== 'profile' && !state.hasMore)) return;
+    const generation = state.generation;
+    state.autoTimer = win.setTimeout(() => {
+      state.autoTimer = null;
+      if (generation === state.generation && state.opened && !state.autoPaused && state.settings.autoLoad && !state.loadAll) loadNextPage();
+    }, 450);
+  }
+
   function diagnosticReport() {
     return JSON.stringify({
-      version: VERSION, mode: state.mode, loader: 'Instagram page responses',
+      version: VERSION, mode: state.mode, loader: native.request ? 'Captured profile cursor pagination' : 'Instagram page responses',
       hooks: native.hooks, observedRequests: native.requests, capturedResponses: native.responses,
       discoveredPosts: state.postGroups.size,
       detailVerifiedPosts: [...state.postGroups.values()].filter(group => group.media.__fullDetails && group.complete).length,
-      profileScanPending: Boolean(state.profileSweep),
+      profileScanPending: state.mode === 'profile' && !state.exhausted,
       feedEndObserved: native.pageInfo?.more === false,
+      firstPageObserved: Boolean(native.pageInfo?.rooted), feedPages: native.feedPages.size,
+      profilePostsKnown: native.profileCodes.size, expectedPosts: native.expectedPosts,
+      coverageGap: coverageGap(), cursorStalled: Boolean(native.pageInfo?.stalled),
+      profileComplete: state.mode === 'profile' && state.exhausted && !coverageGap() && !incompletePosts().length,
+      replayRequests: native.replayRequests, replayPages: native.replayPages,
       cachedPosts: native.items.size, renderedMedia: state.media.length, paused: state.autoPaused,
       pagesLoaded: state.pagesLoaded, moreKnown: native.pageInfo?.more ?? null,
       recentHttpErrors: native.errors, failedMedia: state.stats.failures,
@@ -845,6 +1049,8 @@
 
   function resetSession(route = detectRoute()) {
     state.controller?.abort();
+    win.clearTimeout(state.autoTimer);
+    state.autoTimer = null;
     state.generation += 1;
     state.routeKey = route.key;
     state.mode = route.mode;
@@ -852,8 +1058,8 @@
     state.profileSweep = route.mode === 'profile';
     state.username = route.username;
     state.nativeConsumed = new Map();
-    state.nativeStep = 0;
     state.autoPaused = false;
+    state.userPaused = false;
     state.starting = false;
     state.mediaById = new Map();
     state.postGroups = new Map();
@@ -862,7 +1068,6 @@
     state.detailRequests = 0;
     refreshRequests.clear();
     routeCache(route);
-    state.nextCursor = null;
     state.hasMore = false;
     state.exhausted = false;
     state.loading = false;
@@ -870,7 +1075,7 @@
     state.pagesLoaded = 0;
     state.media = [];
     state.lightboxIndex = -1;
-    state.stats = { images: 0, videos: 0, carousels: 0, ads: 0, duplicates: 0, failures: 0 };
+    state.stats = { images: 0, videos: 0, carousels: 0, failures: 0 };
     ui?.clearGallery();
     ui?.refresh();
   }
@@ -897,11 +1102,10 @@
   async function loadNextPage(detailsOnly = false) {
     if (state.loading || (!detailsOnly && state.exhausted) || !state.opened) return { added: 0, busy: state.loading };
     if (!detailsOnly && state.settings.maxPages > 0 && state.pagesLoaded >= state.settings.maxPages) {
-      state.exhausted = true;
-      state.hasMore = false;
+      state.autoPaused = true;
       ui.setStatus(`Stopped at the ${state.settings.maxPages}-page limit.`);
       ui.refresh();
-      return { added: 0 };
+      return { added: 0, waiting: true };
     }
     const generation = state.generation;
     const route = detectRoute();
@@ -913,20 +1117,22 @@
     ui.refresh();
     try {
       const json = detailsOnly ? { items: incompletePosts().map(group => group.media),
-        more_available: state.hasMore, next_max_id: state.nextCursor } : await fetchPage(state.nextCursor, state.controller.signal);
+        more_available: state.hasMore } : await fetchPage(state.controller.signal);
       checkSession(generation, route, state.controller.signal);
       const before = state.media.length;
       appendRawMedia(json.items);
       await expandPosts(incompletePosts().map(group => group.media), generation, route, state.controller.signal);
       checkSession(generation, route, state.controller.signal);
       const added = state.media.length - before;
-      if (json.items.length && !detailsOnly) state.pagesLoaded += 1;
-      state.nextCursor = json.next_max_id;
-      state.hasMore = json.more_available;
+      if ((json.items.length || json.__pageFetched) && !detailsOnly) state.pagesLoaded += 1;
+      // Responses may have advanced the feed while post details were loading.
+      state.hasMore = detailsOnly ? state.hasMore : state.profileSweep || native.pageInfo?.more !== false || coverageGap() > 0 || pendingNativeItems().length > 0;
       state.exhausted = !state.hasMore;
       state.autoPaused = Boolean(json.__waiting);
       if (json.__waiting) {
-        ui.setStatus('Instagram has not returned more posts. Close the gallery to check the page, then reopen or press Load more.');
+        ui.setStatus(coverageGap() ? `Profile incomplete: ${native.profileCodes.size} of ${native.expectedPosts} advertised posts found.`
+          : native.pageInfo?.stalled ? 'Profile incomplete: Instagram repeated its pagination cursor. Press Load more to retry.'
+          : 'Profile incomplete: waiting for Instagram to return more posts. Press Load more to retry.');
       } else {
         const missing = incompletePosts().length;
         ui.setStatus(`${added ? `Loaded ${added} new media items` : 'Updated loaded media'}${state.exhausted && !missing ? ' — end reached.' : '.'}${missing ? ` ${missing} posts incomplete; use Retry incomplete posts.` : ''}`);
@@ -945,6 +1151,7 @@
         state.loading = false;
         ui.refresh();
         Promise.resolve().then(resumeUnfinishedDetails);
+        scheduleAutoLoad();
       }
     }
   }
@@ -1337,12 +1544,19 @@
   async function toggleLoadAll() {
     if (state.loadAll) {
       state.loadAll = false;
+      state.autoPaused = true;
+      state.userPaused = true;
+      state.controller?.abort();
+      win.clearTimeout(state.autoTimer);
+      state.autoTimer = null;
       ui.toast('Load all stopped.', 'warning');
       ui.refresh();
       return;
     }
 
     state.loadAll = true;
+    state.autoPaused = false;
+    state.userPaused = false;
     ui.toast('Loading every available page. Press Stop to cancel.', 'info', 4000);
     ui.refresh();
 
@@ -1357,6 +1571,7 @@
     const missing = incompletePosts().length;
     const completed = state.loadAll && state.exhausted && !missing;
     state.loadAll = false;
+    if (!completed) state.autoPaused = true;
     ui.toast(completed ? `Load all complete: ${state.media.length} media items.` : missing ? `Loaded ${state.media.length} media; ${missing} posts are incomplete.` : 'Load all stopped.', completed ? 'success' : 'warning', 4000);
     ui.refresh();
   }
@@ -1398,7 +1613,7 @@
           <div class="brand"><strong>IG Gallery ${VERSION}</strong><span class="pill mode">idle</span><span class="pill count">0 media</span></div>
           <div class="controls">
             <button data-action="layout">Layout: Fit</button>
-            <select data-setting="sort" aria-label="Sort posts"><option value="profile">Profile order</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="largest">Largest resolution</option><option value="smallest">Smallest resolution</option></select>
+            <select data-setting="sort" aria-label="Sort posts" title="All sorts show the same media. Instagram grid order includes pinned posts; newest first sorts by date."><option value="profile">Instagram grid (pins first)</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="largest">Largest resolution</option><option value="smallest">Smallest resolution</option></select>
             <button data-action="filter">Filter: All</button>
             <button data-action="captions">Captions: Off</button>
             <button data-action="autoload">Auto: On</button>
@@ -1507,6 +1722,7 @@
 
     function open() {
       state.opened = true;
+      state.userPaused = false;
       app.classList.remove('hidden');
       launcher.classList.add('hidden');
       host.style.pointerEvents = 'auto';
@@ -1533,6 +1749,8 @@
       launcher.style.pointerEvents = 'auto';
       state.loadAll = false;
       state.controller?.abort();
+      win.clearTimeout(state.autoTimer);
+      state.autoTimer = null;
       state.observer?.disconnect();
       previewObserver.disconnect();
     }
@@ -1565,13 +1783,15 @@
       for (const video of $$('video')) video.volume = Number(settings.videoVolume) || 0;
       if (ui && appliedSort !== settings.sort) { appliedSort = settings.sort; orderGallery(); }
       refresh();
+      scheduleAutoLoad();
     }
 
     function refresh() {
       const missing = incompletePosts().length;
       $('.mode').textContent = state.mode;
       $('.count').textContent = `${state.media.length} media`;
-      $('.stats').textContent = `Pages ${state.pagesLoaded} • Images ${state.stats.images} • Videos ${state.stats.videos} • Carousels ${state.stats.carousels}${missing ? ` • ${missing} posts ${state.loading && !state.detailPaused ? 'loading' : 'incomplete'}` : ''}`;
+      const posts = native.expectedPosts == null ? `${state.postGroups.size}` : `${state.postGroups.size}/${native.expectedPosts}`;
+      $('.stats').textContent = `Posts ${posts} • Images ${state.stats.images} • Videos ${state.stats.videos} • Carousels ${state.stats.carousels}${missing ? ` • ${missing} posts ${state.loading && !state.detailPaused ? 'loading' : 'incomplete'}` : ''}`;
       const retry = $('[data-action="retry-posts"]');
       retry.classList.toggle('hidden', !missing);
       retry.disabled = state.loading;
@@ -1863,10 +2083,11 @@
       }
       if (action === 'autoload') {
         state.settings.autoLoad = !state.settings.autoLoad;
+        if (state.settings.autoLoad) { state.autoPaused = false; state.userPaused = false; }
         saveSettings(); applySettings();
         toast(`Auto-load ${state.settings.autoLoad ? 'enabled' : 'disabled'}.`, 'success');
       }
-      if (action === 'load') loadNextPage();
+      if (action === 'load') { state.userPaused = false; loadNextPage(); }
       if (action === 'load-all') toggleLoadAll();
       if (action === 'retry-posts') retryIncompletePosts();
       if (action === 'export') exportUrls();

@@ -14,7 +14,8 @@ Instagram's native profile layout crops portrait images into thumbnails and make
 - Drag-to-pan while zoomed
 - Continuous previous/next browsing
 - Automatic loading near the end of the gallery
-- Manual **Load more** and optional **Load all**
+- Automatic profile scanning, manual **Load more**, and **Load all** with Stop
+- Grid order (including pins), newest/oldest, and resolution sorting of the same complete media collection
 - Direct image downloads
 - Direct video downloads
 - Open media or the original Instagram post
