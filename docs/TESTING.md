@@ -40,7 +40,7 @@ Disable every older copy of the userscript before testing. Test the exact file/v
 - Drag while zoomed and confirm it pans without resetting.
 - Confirm a completed drag does not trigger an accidental click-to-reset.
 - Press `F` / **Reset view** and confirm the fitted view is restored.
-- Navigate to another media item and confirm the new item starts from a clean fitted view.
+- Navigate to another media item and confirm zoom is preserved with centered pan; Reset view restores fitted size.
 
 ## Viewer pagination
 
@@ -106,3 +106,21 @@ Regression fixtures verify six retrieved slides survive a later two-slide summar
 - Change every sort mode, reopen the gallery, and verify saved choice, carousel adjacency, and viewer selection. Resolution sorting groups posts by the largest available slide pixel area.
 - Zoom, navigate next/previous, and wrap at the end; check the same scale on the next image, centered pan, and functioning Reset view.
 - Fling through a large profile in a real browser and inspect thumbnail visibility, reserved card geometry, network requests, and memory. Automated DOM fixtures verify policy; they do not measure compositor smoothness.
+
+### Profile completeness (2.2.0)
+
+- Open immediately after navigating, before the native grid appears. With Auto on, leave the gallery scroll position alone and confirm it continues collecting profile pages.
+- Repeat after scrolling the native profile to the middle and bottom. Check pins, newest posts, middle posts, and the oldest post against the native grid.
+- Compare the native post count with the gallery's **Posts X/Y**, keeping in mind that media count includes carousel slides while post count does not. A discrepancy must remain visibly incomplete.
+- Use Copy diagnostics: the first page and terminal page must both be observed, `coverageGap` must be zero when a total is known, and incomplete slides must prevent `profileComplete`.
+- Check modern ordered timeline and collaborative posts. Open each carousel and compare every ordered slide, including mixed photo/video posts.
+- Change all five sorts and compare the same post/slide identities. An older pin belongs first in grid order and at its actual date in newest order.
+- Stop Load all during a request; confirm no new pages are requested behind Stop. Resume with Load more/Load all. Close or navigate during a request and confirm its stale result is discarded.
+- With a page limit, confirm the status says limit rather than end. A repeated cursor, 429, failed request, or count gap must also pause without claiming completion.
+- Run both Chromium fixtures with `npm run test:browser` and `IG_BROWSER_POSTS=216 npm run test:browser`. They exercise real browser fetch, Headers, DOM, and observers with intercepted data; they do not authenticate to Instagram.
+
+### Review fixes (2.2.1)
+
+- Disable Auto, then enable it from the userscript manager menu. Verify scanning resumes and the in-gallery Auto control updates. Repeat after Stop cancels Load all.
+- After a terminal response leaves a post-count gap, press Load more or Load all. Verify it restarts the traversal, keeps known media, and recovers newly available posts. An unchanged gap must pause again without repeated automatic restarts.
+- Replay fixtures verify inferred form content type and one value per case-insensitive header, with captured values overriding defaults.

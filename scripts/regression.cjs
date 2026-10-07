@@ -128,7 +128,8 @@ test('Manager transport decodes prefixed text after native fetch fails',async()=
  e.w.GM_xmlhttpRequest=options=>{options.onload({status:200,responseText:'for (;;);'+JSON.stringify({items:[stack('SIX','74263')]})});return {abort(){}}};
  try{e.open();await settle(30);assert.equal(e.test.state.media.length,6);assert.equal(e.calls.length,1)}finally{e.close()}
 });
-function environment({script=source,boot=null,html='',gm=new Map(),local=new Map(),fetcher=async()=>new Response('',{status:404}),instrument=true,fakeXHR=false}={}) {
+function environment({script=source,boot=null,html='',gm=new Map(),local=new Map(),fetcher=async()=>new Response('',{status:404}),instrument=true,fakeXHR=false,autoLoad=false}={}) {
+ if(!gm.has(key)) gm.set(key,JSON.stringify({autoLoad}));
  const dom = new JSDOM(`<!doctype html><html><body>${boot?`<script type="application/json" data-sjs>${JSON.stringify(boot)}</script>`:''}<main>${html}</main></body></html>`,{url:'https://www.instagram.com/alice/',runScripts:'outside-only',pretendToBeVisual:true});
  const w=dom.window, calls=[],menus=new Map();
  let time=Date.now();
@@ -163,7 +164,7 @@ function environment({script=source,boot=null,html='',gm=new Map(),local=new Map
  w.eval(code);
  w.document.dispatchEvent(new w.Event('DOMContentLoaded'));
  const root=w.document.getElementById('ig-full-size-gallery-host').shadowRoot;
- return {w,dom,calls,gm,menus,root,test:w.__test,open:()=>root.querySelector('.launcher').click(),close:()=>dom.window.close()};
+ return {w,dom,calls,gm,menus,root,test:w.__test,open:()=>root.querySelector('.launcher').click(),close:()=>{root.querySelector('[data-action="close"]').click();dom.window.close()}};
 }
 test('Full userscript loads boot media and carousel while all REST calls would return 404',async()=>{
  const first=photo('A','101'); const carousel={code:'B',pk:'102',user:{username:'alice'},carousel_media_count:2,carousel_media:[photo('','201'),photo('','202')]};
@@ -357,4 +358,5 @@ test('Rejected downloads and HTML responses never report success or open a new t
  const e=environment({boot:timeline([photo('A','101')],false)});
  try{e.open();await settle();let opened=0,saved=0;e.w.open=()=>opened++;e.w.HTMLAnchorElement.prototype.click=()=>saved++;e.w.GM_download=o=>o.onerror();e.w.GM_xmlhttpRequest=o=>o.onload({status:200,response:new e.w.Blob(['login page'],{type:'text/html'})});await e.test.downloadEntry(e.test.state.media[0]);assert.equal(opened,0);assert.equal(saved,0);assert.equal(e.test.state.media[0].downloadState,'idle');assert.match(e.root.querySelector('.toast.error').textContent,/Download failed/);assert.equal(e.root.querySelectorAll('.toast.success').length,0)}finally{e.close()}
 });
+require('./profile-regressions.cjs')({test,environment,until,settle,photo,stack,timeline,cover,assert,key});
 (async()=>{let failed=0;for(const {name,run}of tests){try{await run();console.log('PASS '+name)}catch(error){failed++;console.error('FAIL '+name+'\n'+error.stack)}}console.log(`${tests.length-failed}/${tests.length} passed`);process.exitCode=failed?1:0})()

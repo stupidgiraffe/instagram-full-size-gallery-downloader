@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented here.
 
+## [2.2.1] - 2026-10-08
+
+### Fixed
+
+- Preserve the inferred form content type of captured URLSearchParams bodies and merge replay headers case-insensitively, preventing duplicate authentication/app header values.
+- Share the Auto toggle between the gallery and userscript menu. Enabling it clears Stop's pause and schedules loading; disabling it cancels its pending timer.
+- Make explicit Load more/Load all retries restart a terminal count gap from the first page, through captured pagination or native scrolling. Keep known media and pause again if the gap remains instead of looping automatically.
+
+### Validation
+
+- Seven focused regressions cover inferred form bodies, Headers/mixed-case objects, menu resume after disabling/Stop, cursor-chain recovery, native-grid recovery, and bounded retry of an unchanged count gap.
+- Chromium fixtures validate the actual outgoing form content type and captured headers, including overriding differently cased default headers.
+
+## [2.2.0] - 2026-10-06
+
+### Changed
+
+- Capture profile request bodies and permitted headers from fetch (including Request objects) and XHR. Reuse observed GraphQL/REST pagination without hardcoding a profile operation ID; retain provider variables and form fields.
+- Track a connected cursor chain beginning at the first page. Recover the root when opened at the middle/bottom; a disconnected terminal response, repeated cursor, timeout, page limit, or advertised count gap cannot prove completion. Stale boot data cannot replace a newer live frontier or grid order.
+- Automatically scan profile pages while the gallery is open, independent of its scroll sentinel. Keep paced requests, bounded transient retries, rate-limit pauses, cancellation, and manual controls. Stop also pauses background scanning.
+- Recognize modern ordered timeline stubs, verify missing full sources, and retain collaborative posts from a validated profile feed. Exclude tagged/foreign feed responses from profile membership and completion.
+- Render newly captured posts immediately, including while carousel details are loading. Remove the 600-post cache eviction, synthetic cursor state, and unused cache/statistics fields. Batch DOM row discovery and live feed updates.
+- Merge complementary partial carousel slides by identity without discarding known media. Keep all five sorts on the same collection, and label the grid option **Instagram grid (pins first)**. Show post coverage in the status bar and add cursor/coverage diagnostics.
+
+### Validation
+
+- Syntax/metadata checks and 81 behavioral regressions cover startup, scope, missing/root/repeated cursors, fetch/XHR/REST contracts, retries, cancellation, 605 cached posts, sorting, slide expansion, late responses, and DOM batching.
+- Real Chromium fixtures cover early launch, captured cursor pagination, collaborative carousels, all five sorts, pins, retained zoom, and close/reopen. Fixtures intercept all traffic and use no Instagram account.
+- Authenticated Instagram and the Greasy Fork-installed copy still require live verification. Advertised profile counts can differ from accessible posts; such a difference remains visibly incomplete.
+
 ## [2.1.11] - 2026-09-30
 
 ### Changed

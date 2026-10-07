@@ -28,7 +28,7 @@ The result is closer to a real photo gallery than Instagram's native profile vie
 
 - Uncropped portrait and landscape media
 - Full-size image and video wall
-- Sort by profile order, newest/oldest, or largest/smallest resolution while keeping carousel slides together
+- Sort the same media by Instagram grid order (including pins), newest/oldest, or largest/smallest resolution while keeping carousel slides together
 - Preserve zoom between viewer images
 - Open immediately while Instagram loads; the gallery waits for the first profile batch
 - Automatic expansion of carousel posts into separate, adjacent photo/video items
@@ -37,7 +37,7 @@ The result is closer to a real photo gallery than Instagram's native profile vie
 - Medium, large, and huge gallery sizing
 - Image-only and video-only filters
 - Optional captions
-- Automatic infinite loading near the bottom
+- Automatic profile scanning from the first page to the verified end, without scrolling the gallery
 - Manual **Load more**
 - Optional **Load all** with stop support
 - Duplicate and repeated-cursor protection
@@ -151,7 +151,7 @@ The distributed userscript is readable source code and has no remote `@require` 
 | `GM_setClipboard` | Copy post/media URLs |
 | `GM_download` | Download images and videos directly |
 | `GM_xmlhttpRequest` | Retrieve media blobs when manager downloads fail; fallback transport for post details and expired-media refresh |
-| `unsafeWindow` | Observe Instagram's native media responses and scroll the page to load more posts |
+| `unsafeWindow` | Observe Instagram's profile requests/responses and reuse their pagination contract; scroll the native grid when no replayable request is available |
 | `@connect instagram.com` / `www.instagram.com` / `i.instagram.com` | Retrieve complete post media, including missing carousel slides, and refresh expired URLs |
 | `@connect *.cdninstagram.com` / `*.fbcdn.net` | Media retrieval/download fallbacks |
 
@@ -171,21 +171,24 @@ Common symptoms:
 
 - **Media from the previous profile appears:** reload and confirm only one script copy is enabled. The current code also rejects stale responses after route changes.
 - **A download fails:** the script tries available media URLs, a blob download, and one expired-media refresh. It reports failure if these fail; opening a remote URL does not count as a successful download.
-- **HTTP 404 during gallery loading:** v2.1.6 reads Instagram's own page data and native responses, without requesting the old profile/feed REST routes. Use **Copy diagnostics** to include the script version and failed endpoint/status in a report.
-- **Waiting for more posts:** the gallery has paused because Instagram did not return more media. Close the gallery, check that Instagram itself loads the posts, then reopen or press **Load more**. A timeout does not count as the end of the feed.
-- **Only a cover appears:** v2.1.10 automatically requests complete post details and expands every available slide. Temporary failures retry automatically (three rounds with backoff). Exact collaborative-post matches are accepted even with a different primary author. If Instagram still rejects the request, the post stays labeled incomplete; use **Retry incomplete posts**. The script does not count an unresolved cover as a complete carousel. If retry fails, copy diagnostics and include `postDetailErrors`; these distinguish HTML responses, GraphQL errors, and missing matching post data.
+- **HTTP errors during profile loading:** profile pagination reuses an observed Instagram request rather than guessing an endpoint or query ID. Transient transport/server failures retry with backoff; 401/403/429 pauses further automatic requests. Use **Copy diagnostics** to include the script version and failed endpoint/status in a report.
+- **Profile incomplete / waiting for more posts:** a stalled cursor, missing response, page limit, or advertised count gap remains incomplete. **Load more** retries; **Retry incomplete posts** resolves missing slides. Neither a timeout nor reaching the current bottom of Instagram's grid proves the profile is finished.
+- **Only a cover appears:** complete post details are requested automatically. Temporary failures retry with backoff. Collaborative posts belonging to the profile are accepted even with a different primary author. If Instagram still rejects the request, the post stays labeled incomplete. The script does not count an unresolved cover as a complete carousel. Copy diagnostics and include `postDetailErrors` when reporting persistent failures.
 
 Use the [bug-report template](https://github.com/stupidgiraffe/instagram-full-size-gallery-downloader/issues/new/choose) for reproducible regressions.
 
 ## Development
 
-There is no runtime build step or dependency. The distributed `.user.js` file is also the source. Automated behavioral tests use jsdom as a development dependency.
+There is no runtime build step or dependency. The distributed `.user.js` file is also the source. Tests use jsdom and Playwright as development dependencies.
 
 Local verification:
 
 ```bash
 npm ci
 npm test
+npx playwright install chromium --only-shell
+npm run test:browser
+IG_BROWSER_POSTS=216 npm run test:browser
 ```
 
 Before changing loader, pagination, media sizing, or viewer geometry, map the complete behavior on both sides of the change and run the manual checklist in [`docs/TESTING.md`](docs/TESTING.md).
@@ -193,6 +196,8 @@ Before changing loader, pagination, media sizing, or viewer geometry, map the co
 The automated tests use controlled page and network fixtures. They do not replace checks in a logged-in Instagram session or verification of the Greasy Fork-installed copy.
 
 Post resolution uses `PolarisPostRootQuery` (`doc_id=27128499623469141`) and the `xdt_api__v1__media__shortcode__web_info.items` response, checked against [Instaloader's current post metadata implementation](https://github.com/instaloader/instaloader/blob/master/instaloader/structures.py) on 2026-09-10. There is one media-info fallback. These private Instagram contracts may change; a successful HTTP response alone does not prove that all declared carousel children were returned.
+
+Profile pagination follows the first page and its connected `page_info.end_cursor` chain. Request capture preserves Instagram's own operation ID, variables, form fields, and permitted request headers, changing only the cursor. This approach was compared with [Instaloader's iterator](https://github.com/instaloader/instaloader/blob/master/instaloader/nodeiterator.py) and [instagram-graphql-scraper's captured-request replay](https://github.com/FaustRen/instagram-graphql-scraper/blob/main/graphql.py) on 2026-10-06. Their implementations are references, not runtime dependencies. The ordered timeline, legacy timeline, and observed REST profile-feed shapes have fixture coverage.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CHANGELOG.md`](CHANGELOG.md), and [`NOTICE.md`](NOTICE.md) for project history and contribution expectations.
 
@@ -232,8 +237,8 @@ This project is not affiliated with, endorsed by, or sponsored by Instagram or M
 
 Licensed under the [GNU Affero General Public License v3.0 or later](LICENSE).
 
-New profile sessions return Instagram’s underlying page to the top and scan down by viewport to discover rows above the launch position, including virtualized grids. The script still depends on Instagram returning the media; unavailable posts are never reported as complete.
+With **Auto: On**, opening a profile starts a paced scan through every connected page while the gallery remains usable. Opening before the first grid appears waits for Instagram's initial data. A captured middle/bottom page triggers first-page recovery. If request capture is unavailable, the native grid is scanned from the top by viewport. **Stop** cancels loading and pauses automatic scanning; **Load more**, **Load all**, or enabling Auto resumes it.
 
-Diagnostics distinguish discovered posts from full-detail-verified posts. `moreKnown: true` means more feed posts remain; use **Load all** to continue. `incompletePosts: 0` only covers known metadata, not unseen posts. Later summaries preserve known slides, and newly discovered gaps trigger detail retrieval automatically.
+Diagnostics distinguish discovered posts, profile coverage, and complete slides. `firstPageObserved`, `feedEndObserved`, `coverageGap`, and `incompletePosts` contribute to `profileComplete`. A later terminal response cannot hide a missing earlier cursor. Advertised totals are checked when Instagram exposes them; a count gap is reported rather than silently accepted. `incompletePosts: 0` alone still says nothing about unseen posts. Later summaries retain known slides, and new profile posts render as responses arrive, including during slow post-detail requests. The active-route cache no longer evicts unconsumed posts above 600 items and is cleared on navigation.
 
-Sorting applies to posts and preserves each carousel’s slide order. Largest/smallest compares pixel resolution (the largest slide area in each post), not file size. Date sorting uses supplied post timestamps with numeric media IDs as a fallback. Fast scrolling keeps lazy loading for distant images while preloading nearby images and retaining available thumbnail backgrounds; browser rendering and network speed can still produce temporary gaps.
+Every sort operates on exactly the same post groups and media. **Instagram grid (pins first)** follows the connected profile feed's order; **Newest first** uses dates, so older pinned posts move to their chronological position. While grid data is pending, discovered posts retain their discovery order. Carousel slides stay together. Largest/smallest compares pixel resolution, not file size. Date sorting uses supplied timestamps with numeric media IDs as a fallback. Nearby images preload; distant images stay lazy. Fast-scroll smoothness still depends on browser rendering and network speed.
