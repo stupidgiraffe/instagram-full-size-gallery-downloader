@@ -4,6 +4,77 @@ module.exports = ({test, environment, until, settle, photo, stack, timeline, cov
  const request = (e, after=null, username='alice') => e.w.fetch('/api/graphql', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':'PolarisProfilePosts'}, body:new URLSearchParams({doc_id:'observed-document',variables:JSON.stringify({username,after,first:12,data:{count:12},providerFlag:true}),lsd:'session-lsd',extra:'preserved'}).toString()});
  const vars = options => JSON.parse(new URLSearchParams(options.body).get('variables'));
 
+ test('Replay preserves URLSearchParams inferred form content type across realms',async()=>{
+  const e=environment({fetcher:async(_url,o)=>Response.json(vars(o).after===null?page([photo('FIRST','200')],'one',true):page([photo('NEXT','100')],null,false))});
+  try{
+   const body=new URLSearchParams({doc_id:'form-document',variables:JSON.stringify({username:'alice',after:null,first:12})});
+   await e.w.fetch('/api/graphql',{method:'POST',body});await settle();e.open();await until(()=>!e.test.state.loading);await e.test.loadNextPage();
+   const {method,headers,body:replayBody}=e.calls[1][1];
+   const replay=new Request(e.calls[1][0],{method,headers,body:replayBody});
+   assert.match(replay.headers.get('content-type'),/^application\/x-www-form-urlencoded(?:;|$)/i);
+   assert.equal(new URLSearchParams(await replay.text()).get('doc_id'),'form-document');assert.equal(e.test.state.media.length,2);
+  }finally{e.close()}
+ });
+ test('Replay merges captured Headers and mixed-case objects without duplicate values',async()=>{
+  for(const supplied of [new Headers({'X-CSRFToken':'captured-csrf','X-IG-App-ID':'captured-app','X-ASBD-ID':'captured-asbd','X-Requested-With':'fetch'}),{'x-CsRfToKeN':'captured-csrf','x-ig-app-id':'captured-app','X-ASBD-ID':'captured-asbd','x-requested-with':'fetch'}]){
+   const e=environment({fetcher:async(_url,o)=>Response.json(vars(o).after===null?page([photo('FIRST','200')],'one',true):page([photo('NEXT','100')],null,false))});
+   try{
+    e.w.document.cookie='csrftoken=default-csrf';
+    await e.w.fetch('/api/graphql',{method:'POST',headers:supplied,body:new URLSearchParams({doc_id:'headers-document',variables:JSON.stringify({username:'alice',after:null,first:12})})});
+    await settle();e.open();await until(()=>!e.test.state.loading);await e.test.loadNextPage();
+    const replay=new Headers(e.calls[1][1].headers);
+    for(const [name,value] of Object.entries({'x-csrftoken':'captured-csrf','x-ig-app-id':'captured-app','x-asbd-id':'captured-asbd','x-requested-with':'fetch'}))assert.equal(replay.get(name),value);
+    assert.equal(e.test.state.media.length,2);
+   }finally{e.close()}
+  }
+ });
+ test('Userscript menu resumes Auto after disabling it and updates the gallery control',async()=>{
+  const e=environment({autoLoad:true,fetcher:async(_url,o)=>Response.json(vars(o).after===null?page([photo('FIRST','200')],'one',true):page([photo('NEXT','100')],null,false))});
+  try{
+   await request(e);await settle();e.open();await until(()=>!e.test.state.starting);
+   const toggle=e.menus.get('Toggle automatic loading');toggle();await settle(30);
+   assert.equal(e.calls.length,1);assert.equal(e.test.state.autoTimer,null);assert.match(e.root.querySelector('[data-action="autoload"]').textContent,/Off/);
+   toggle();await until(()=>e.test.state.exhausted&&!e.test.state.loading);
+   assert.equal(e.calls.length,2);assert.equal(e.test.state.media.length,2);assert.match(e.root.querySelector('[data-action="autoload"]').textContent,/On/);
+  }finally{e.close()}
+ });
+ test('Userscript menu clears Stop pause and resumes the cancelled profile page',async()=>{
+  let resolve,hold=true;
+  const e=environment({autoLoad:true,fetcher:async(_url,o)=>vars(o).after===null?Response.json(page([photo('FIRST','200')],'one',true)):hold?new Promise(r=>{resolve=r}):Response.json(page([photo('NEXT','100')],null,false))});
+  try{
+   await request(e);await settle();e.open();await until(()=>!e.test.state.starting);e.root.querySelector('[data-action="load-all"]').click();await until(()=>Boolean(resolve));e.root.querySelector('[data-action="load-all"]').click();await until(()=>!e.test.state.loading);
+   assert.equal(e.test.state.userPaused,true);hold=false;resolve(Response.json(page([photo('STALE','50')],null,false)));
+   const toggle=e.menus.get('Toggle automatic loading');toggle();toggle();await until(()=>e.test.state.exhausted&&!e.test.state.loading);
+   assert.equal(e.test.state.userPaused,false);assert.deepEqual(Array.from(e.test.state.media,m=>m.shortcode),['FIRST','NEXT']);assert.deepEqual(e.calls.map(([,o])=>vars(o).after),[null,'one','one']);
+  }finally{e.close()}
+ });
+ test('Load more restarts a terminal count gap and follows the fresh cursor chain',async()=>{
+  let working=false;
+  const e=environment({autoLoad:true,boot:{data:{user:{username:'alice',media_count:3}}},fetcher:async(_url,o)=>Response.json(!working?page([photo('FIRST','300'),photo('LAST','100')],null,false):vars(o).after===null?page([photo('FIRST','300')],'one',true):page([photo('MIDDLE','200'),photo('LAST','100')],null,false))});
+  try{
+   await request(e);await settle();e.open();await until(()=>e.test.state.autoPaused&&!e.test.state.loading);assert.equal(e.calls.length,1);assert.equal(e.test.state.media.length,2);
+   working=true;e.root.querySelector('[data-action="load"]').click();await until(()=>e.test.state.exhausted&&!e.test.state.loading);
+   assert.deepEqual(e.calls.map(([,o])=>vars(o).after),[null,null,'one']);assert.deepEqual(Array.from(e.test.state.media,m=>m.shortcode),['FIRST','MIDDLE','LAST']);assert.equal(JSON.parse(e.test.diagnosticReport()).profileComplete,true);
+  }finally{e.close()}
+ });
+ test('Load all retries an unchanged terminal count gap once and pauses again',async()=>{
+  const e=environment({autoLoad:true,boot:{data:{user:{username:'alice',media_count:3}}},fetcher:async()=>Response.json(page([photo('FIRST','300')],null,false))});
+  try{
+   await request(e);await settle();e.open();await until(()=>e.test.state.autoPaused&&!e.test.state.loading);
+   e.root.querySelector('[data-action="load-all"]').click();await until(()=>!e.test.state.loadAll&&e.test.state.autoPaused&&!e.test.state.loading);await settle(30);
+   assert.equal(e.calls.length,2);assert.equal(e.test.state.media.length,1);assert.equal(e.test.state.exhausted,false);assert.equal(JSON.parse(e.test.diagnosticReport()).profileComplete,false);
+  }finally{e.close()}
+ });
+ test('Load more retries a terminal count gap through the native grid without a template',async()=>{
+  const e=environment({boot:{data:{user:{username:'alice',media_count:3,edge_owner_to_timeline_media:{count:3,edges:[{node:photo('FIRST','300')}],page_info:{has_next_page:false,end_cursor:null}}}}}});
+  try{
+   e.open();await until(()=>!e.test.state.loading);await e.test.loadNextPage();let topObserved=false;
+   e.w.scrollTo=({top})=>{if(!topObserved&&top===0){topObserved=true;e.test.ingestPayload(page([photo('FIRST','300')],'one',true),e.test.detectRoute());}else if(topObserved)e.test.ingestPayload(page([photo('MIDDLE','200'),photo('LAST','100')],null,false),e.test.detectRoute());};
+   e.root.querySelector('[data-action="load"]').click();await until(()=>e.test.state.exhausted&&!e.test.state.loading);
+   assert.equal(topObserved,true);assert.equal(e.calls.length,0);assert.deepEqual(Array.from(e.test.state.media,m=>m.shortcode),['FIRST','MIDDLE','LAST']);
+  }finally{e.close()}
+ });
+
  test('Captured profile cursors load every page without native scrolling',async()=>{
   const e=environment({fetcher:async(_url,options)=>Response.json(vars(options).after===null?page([photo('PIN','50'),stack('NEW','300',3)],'cursor-1',true):vars(options).after==='cursor-1'?page([photo('MID','200')],'cursor-2',true):page([photo('OLD','100')],null,false))});
   try{await request(e);await settle();e.open();await until(()=>!e.test.state.loading);await e.test.loadNextPage();await e.test.loadNextPage();assert.deepEqual(Array.from(e.test.state.media,m=>m.shortcode),['PIN','NEW','NEW','NEW','MID','OLD']);assert.equal(e.test.state.exhausted,true);assert.deepEqual(e.calls.map(([,o])=>vars(o).after),[null,'cursor-1','cursor-2']);const body=new URLSearchParams(e.calls[1][1].body);assert.equal(body.get('doc_id'),'observed-document');assert.equal(body.get('extra'),'preserved');assert.equal(vars(e.calls[1][1]).providerFlag,true)}finally{e.close()}

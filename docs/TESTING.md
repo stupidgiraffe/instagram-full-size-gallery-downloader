@@ -118,3 +118,9 @@ Regression fixtures verify six retrieved slides survive a later two-slide summar
 - Stop Load all during a request; confirm no new pages are requested behind Stop. Resume with Load more/Load all. Close or navigate during a request and confirm its stale result is discarded.
 - With a page limit, confirm the status says limit rather than end. A repeated cursor, 429, failed request, or count gap must also pause without claiming completion.
 - Run both Chromium fixtures with `npm run test:browser` and `IG_BROWSER_POSTS=216 npm run test:browser`. They exercise real browser fetch, Headers, DOM, and observers with intercepted data; they do not authenticate to Instagram.
+
+### Review fixes (2.2.1)
+
+- Disable Auto, then enable it from the userscript manager menu. Verify scanning resumes and the in-gallery Auto control updates. Repeat after Stop cancels Load all.
+- After a terminal response leaves a post-count gap, press Load more or Load all. Verify it restarts the traversal, keeps known media, and recovers newly available posts. An unchanged gap must pause again without repeated automatic restarts.
+- Replay fixtures verify inferred form content type and one value per case-insensitive header, with captured values overriding defaults.

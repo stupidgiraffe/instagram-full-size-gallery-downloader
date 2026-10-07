@@ -13,7 +13,7 @@
 // @compatible   brave
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
-// @version      2.2.0
+// @version      2.2.1
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -232,7 +232,7 @@
     };
   }
 
-  const VERSION = '2.2.0';
+  const VERSION = '2.2.1';
   const POST_QUERY_ID = '27128499623469141';
   const native = {
     key: '', items: new Map(), profileCodes: new Set(), profileOrder: new Map(), pendingUpdates: null, scripts: new WeakSet(),
@@ -803,7 +803,10 @@
       const entries = typeof suppliedHeaders.forEach === 'function'
         ? (() => { const values = []; suppliedHeaders.forEach((value, key) => values.push([key, value])); return values; })()
         : Array.isArray(suppliedHeaders) ? suppliedHeaders : Object.entries(suppliedHeaders || {});
-      for (const [key, value] of entries) if (/^(?:content-type|x-ig-app-id|x-asbd-id|x-requested-with|x-csrftoken|x-ig-www-claim|x-fb-lsd|x-fb-friendly-name)$/i.test(key)) result.headers[key] = String(value);
+      for (const [key, value] of entries) if (/^(?:content-type|x-ig-app-id|x-asbd-id|x-requested-with|x-csrftoken|x-ig-www-claim|x-fb-lsd|x-fb-friendly-name)$/i.test(key)) result.headers[key.toLowerCase()] = String(value);
+      if (Object.prototype.toString.call(body) === '[object URLSearchParams]' && !result.headers['content-type']) {
+        result.headers['content-type'] = 'application/x-www-form-urlencoded;charset=UTF-8';
+      }
       if (/\/api\/v1\/feed\/user\//.test(url.pathname) && result.method === 'GET') {
         result.cursor = url.searchParams.get('max_id');
         result.cursorKnown = result.replayable = true;
@@ -937,12 +940,14 @@
     } else if (cursor) url.searchParams.set('max_id', cursor);
     else url.searchParams.delete('max_id');
     const context = describeRequest(url, template.method, body, template.headers);
+    const replayHeaders = Object.fromEntries([...Object.entries(headers()), ...Object.entries(template.headers)]
+      .map(([key, value]) => [key.toLowerCase(), value]));
     for (let attempt = 0; attempt < 3; attempt += 1) {
       checkSession(generation, route, signal);
       try {
         native.replayRequests += 1;
         const json = await requestPostJson(url.href, { method: template.method, body,
-          headers: { ...headers(), ...template.headers } }, signal);
+          headers: replayHeaders }, signal);
         checkSession(generation, route, signal);
         if (json?.status === 'fail') {
           const error = new Error(json.message || 'Instagram rejected the profile request');
@@ -978,7 +983,7 @@
     return top >= Math.max(0, target.scrollHeight - target.clientHeight);
   }
 
-  async function fetchPage(signal) {
+  async function fetchPage(signal, retryProfile = false) {
     const generation = state.generation;
     const route = detectRoute();
     checkSession(generation, route, signal);
@@ -992,7 +997,14 @@
     scanAvailableMedia(route);
     if (native.request) state.profileSweep = false;
     if (pendingNativeItems().length) return takeNativePage();
-    if (!state.profileSweep && native.pageInfo?.more === false) return takeNativePage(coverageGap() > 0);
+    if (!state.profileSweep && native.pageInfo?.more === false) {
+      if (!retryProfile || !coverageGap()) return takeNativePage(coverageGap() > 0);
+      // A terminal count gap needs a fresh traversal, not the cached end page.
+      // Keep known media, but require a newly connected chain to prove coverage.
+      native.feedPages.clear();
+      rebuildFeedOrder();
+      if (!native.request) { state.profileSweep = true; scrollInstagram('top'); }
+    }
     if (route.mode === 'post') return takeNativePage(true);
     if (route.mode === 'profile' && native.request) {
       state.profileSweep = false;
@@ -1066,555 +1078,7 @@
     state.detailJobs = new Map();
     state.detailPaused = false;
     state.detailRequests = 0;
-    refreshRequests.clear();
-    routeCache(route);
-    state.hasMore = false;
-    state.exhausted = false;
-    state.loading = false;
-    state.loadAll = false;
-    state.pagesLoaded = 0;
-    state.media = [];
-    state.lightboxIndex = -1;
-    state.stats = { images: 0, videos: 0, carousels: 0, failures: 0 };
-    ui?.clearGallery();
-    ui?.refresh();
-  }
-
-  async function startSession() {
-    if (state.starting || !state.opened) return;
-    const generation = state.generation;
-    state.starting = true;
-    try {
-      if (state.mode === 'explore') throw new Error('Open a profile, tagged feed, home feed, post, or reel.');
-      if (state.mode === 'profile' && !state.username) throw new Error('Open an Instagram profile first.');
-      await loadNextPage();
-    } catch (error) {
-      if (generation === state.generation && error?.name !== 'AbortError') {
-        state.autoPaused = true;
-        ui.setStatus(`Gallery: ${error.message || error}`);
-        ui.toast(error.message || String(error), 'error', 5000);
-      }
-    } finally {
-      if (generation === state.generation) state.starting = false;
-    }
-  }
-
-  async function loadNextPage(detailsOnly = false) {
-    if (state.loading || (!detailsOnly && state.exhausted) || !state.opened) return { added: 0, busy: state.loading };
-    if (!detailsOnly && state.settings.maxPages > 0 && state.pagesLoaded >= state.settings.maxPages) {
-      state.autoPaused = true;
-      ui.setStatus(`Stopped at the ${state.settings.maxPages}-page limit.`);
-      ui.refresh();
-      return { added: 0, waiting: true };
-    }
-    const generation = state.generation;
-    const route = detectRoute();
-    state.loading = true;
-    state.controller?.abort();
-    state.controller = new AbortController();
-    state.autoPaused = false;
-    ui.setStatus(state.pagesLoaded ? 'Loading more media…' : 'Reading Instagram media…');
-    ui.refresh();
-    try {
-      const json = detailsOnly ? { items: incompletePosts().map(group => group.media),
-        more_available: state.hasMore } : await fetchPage(state.controller.signal);
-      checkSession(generation, route, state.controller.signal);
-      const before = state.media.length;
-      appendRawMedia(json.items);
-      await expandPosts(incompletePosts().map(group => group.media), generation, route, state.controller.signal);
-      checkSession(generation, route, state.controller.signal);
-      const added = state.media.length - before;
-      if ((json.items.length || json.__pageFetched) && !detailsOnly) state.pagesLoaded += 1;
-      // Responses may have advanced the feed while post details were loading.
-      state.hasMore = detailsOnly ? state.hasMore : state.profileSweep || native.pageInfo?.more !== false || coverageGap() > 0 || pendingNativeItems().length > 0;
-      state.exhausted = !state.hasMore;
-      state.autoPaused = Boolean(json.__waiting);
-      if (json.__waiting) {
-        ui.setStatus(coverageGap() ? `Profile incomplete: ${native.profileCodes.size} of ${native.expectedPosts} advertised posts found.`
-          : native.pageInfo?.stalled ? 'Profile incomplete: Instagram repeated its pagination cursor. Press Load more to retry.'
-          : 'Profile incomplete: waiting for Instagram to return more posts. Press Load more to retry.');
-      } else {
-        const missing = incompletePosts().length;
-        ui.setStatus(`${added ? `Loaded ${added} new media items` : 'Updated loaded media'}${state.exhausted && !missing ? ' — end reached.' : '.'}${missing ? ` ${missing} posts incomplete; use Retry incomplete posts.` : ''}`);
-      }
-      ui.refresh();
-      return { added, waiting: json.__waiting };
-    } catch (error) {
-      if (generation !== state.generation || route.key !== detectRoute().key) return { added: 0, stale: true };
-      if (error?.name === 'AbortError') return { added: 0, aborted: true };
-      state.autoPaused = true;
-      ui.setStatus(`Gallery failed: ${error.message || error}`);
-      ui.toast(`Gallery failed: ${error.message || error}`, 'error', 5000);
-      return { added: 0, error };
-    } finally {
-      if (generation === state.generation) {
-        state.loading = false;
-        ui.refresh();
-        Promise.resolve().then(resumeUnfinishedDetails);
-        scheduleAutoLoad();
-      }
-    }
-  }
-
-  function isAd(media) {
-    return Boolean(media?.ad_id || media?.ad_tracking_token || media?.label === 'Sponsored' || media?.sponsor_tags);
-  }
-
-  function isVideo(media) {
-    return Boolean(media?.is_video || media?.is_unified_video || media?.video_duration || media?.media_type === 2 || media?.video_url || media?.video_versions?.length);
-  }
-
-  function captionOf(media) {
-    return media?.caption?.text || media?.edge_media_to_caption?.edges?.[0]?.node?.text || media?.accessibility_caption || '';
-  }
-
-  function uniqueCandidates(groups, fallbackType) {
-    const seen = new Set();
-    const result = [];
-    for (const group of groups) {
-      for (const candidate of Array.isArray(group) ? group : []) {
-        const url = normalizeMediaUrl(candidate?.url || candidate?.src);
-        if (!url || seen.has(url)) continue;
-        seen.add(url);
-        result.push({
-          url,
-          width: Number(candidate?.width || candidate?.config_width || candidate?.original_width || 0),
-          height: Number(candidate?.height || candidate?.config_height || candidate?.original_height || 0),
-          bitrate: Number(candidate?.bitrate || 0),
-          priority: Number(candidate?.priority || 0),
-          type: fallbackType,
-        });
-      }
-    }
-    return result;
-  }
-
-  function imageCandidates(media) {
-    const primary = uniqueCandidates([
-      media?.display_resources,
-      media?.image_versions2?.candidates,
-      media?.image_versions?.items,
-    ], 'image');
-
-    const direct = [
-      media?.display_url && { url: media.display_url, width: media?.dimensions?.width, height: media?.dimensions?.height },
-      media?.image_url && { url: media.image_url },
-      media?.thumbnail_url && { url: media.thumbnail_url },
-    ].filter(Boolean);
-
-    const fallback = uniqueCandidates([direct, media?.thumbnail_resources], 'image');
-    return rankCandidates([...primary, ...fallback], media);
-  }
-
-  function videoCandidates(media) {
-    const direct = media?.video_url ? [{ url: media.video_url, width: media?.original_width, height: media?.original_height }] : [];
-    return rankCandidates(uniqueCandidates([media?.video_versions, media?.video_resources, direct], 'video'), media, true);
-  }
-
-  function rankCandidates(candidates, media, video = false) {
-    const targetW = Number(media?.original_width || media?.width || media?.dimensions?.width || 0);
-    const targetH = Number(media?.original_height || media?.height || media?.dimensions?.height || 0);
-    const targetRatio = targetW && targetH ? targetW / targetH : 0;
-
-    return candidates.sort((a, b) => {
-      const areaA = a.width * a.height;
-      const areaB = b.width * b.height;
-      const ratioPenaltyA = targetRatio && a.width && a.height ? Math.abs((a.width / a.height) - targetRatio) : 0;
-      const ratioPenaltyB = targetRatio && b.width && b.height ? Math.abs((b.width / b.height) - targetRatio) : 0;
-      const scoreA = areaA - ratioPenaltyA * 1e9 + (video ? a.bitrate * 100 : 0);
-      const scoreB = areaB - ratioPenaltyB * 1e9 + (video ? b.bitrate * 100 : 0);
-      return scoreB - scoreA;
-    });
-  }
-
-  function appendRawMedia(rawItems) {
-    const selectedId = state.media[state.lightboxIndex]?.id;
-    const oldEntries = state.media.slice();
-    for (const raw of rawItems || []) {
-      if (!raw || isAd(raw)) continue;
-      const key = postKey(raw);
-      if (!key) continue;
-      const previousGroup = state.postGroups.get(key);
-      const parent = mergePostMedia(previousGroup?.media, raw);
-      const shape = postShape(parent);
-      const children = shape.children.length ? shape.children : [parent];
-      const shortcode = parent.shortcode || parent.code || '';
-      const username = parent.user?.username || parent.owner?.username || state.username;
-      const caption = captionOf(parent);
-      const entries = [];
-      children.forEach((child, index) => {
-        if (!child || isAd(child)) return;
-        const type = isVideo(child) ? 'video' : 'image';
-        const sources = type === 'video' ? videoCandidates(child) : imageCandidates(child);
-        if (!sources.length) return;
-        const stableId = `${key}:${index}`;
-        let entry = state.mediaById.get(stableId);
-        const previousType = entry?.type;
-        const changed = entry && JSON.stringify(entry.sources) !== JSON.stringify(sources);
-        if (!entry) entry = { id: stableId, downloadState: 'idle', sourceIndex: 0 };
-        const posterSources = type === 'video' ? imageCandidates(child).concat(imageCandidates(parent)) : [];
-        Object.assign(entry, {
-          postKey: key, postComplete: shape.complete, preview: Boolean(parent.__preview),
-          mediaId: String(child.pk || child.id || ''), postId: String(parent.pk || parent.id || ''),
-          type, sources, mediaUrl: !changed && entry.mediaUrl ? entry.mediaUrl : sources[0].url,
-          posterUrl: posterSources[0]?.url || '', shortcode, username, caption,
-          postUrl: shortcode ? `https://www.instagram.com/p/${shortcode}/` : location.href,
-          carouselIndex: index, carouselTotal: shape.expected || (shape.complete ? children.length : 0),
-          previewUrl: (() => {
-            const thumbnail = imageCandidates(child).at(-1) || imageCandidates(parent).at(-1);
-            return thumbnail && (type === 'video' || thumbnail.url !== sources[0].url) ? thumbnail.url : '';
-          })(),
-          width: sources[0].width || Number(child.original_width || child.width || child.dimensions?.width || 0),
-          height: sources[0].height || Number(child.original_height || child.height || child.dimensions?.height || 0),
-        });
-        if (!entry.card || previousType !== type) {
-          const oldCard = entry.card;
-          if (oldCard) {
-            ui.releaseCard(oldCard);
-            mediaBindings.get(oldCard.querySelector('img, video'))?.();
-            oldCard.remove();
-          }
-          entry.card = ui.createCard(entry, state.mediaById.size);
-        } else {
-          ui.updateCardPreview(entry.card, entry);
-          if (changed) setSourceWithFallback(entry.card.querySelector('img, video'), entry);
-          const image = entry.card.querySelector('img');
-          if (image) image.alt = caption.slice(0, 160) || 'Instagram image';
-          entry.card.querySelector('.caption').textContent = caption;
-        }
-        state.mediaById.set(stableId, entry);
-        entries.push(entry);
-      });
-      state.postGroups.set(key, { media: parent, entries, complete: shape.complete, carousel: shape.carousel, order: previousGroup?.order ?? state.postGroups.size });
-    }
-    orderGallery(selectedId);
-    const keep = new Set(state.media);
-    for (const entry of oldEntries) if (!keep.has(entry)) {
-      ui.releaseCard(entry.card);
-      mediaBindings.get(entry.card?.querySelector('img, video'))?.();
-      entry.card?.remove();
-    }
-    state.mediaById = new Map(state.media.map(entry => [entry.id, entry]));
-    ui.refresh();
-  }
-
-  function orderGallery(selectedId = state.media[state.lightboxIndex]?.id) {
-    const groups = [...state.postGroups.values()];
-    const timestamp = group => {
-      const value = Number(group.media.taken_at || group.media.taken_at_timestamp || group.media.timestamp || 0);
-      return value > 1e12 ? value / 1000 : value;
-    };
-    const compareAge = (a, b) => {
-      const aDate = timestamp(a), bDate = timestamp(b);
-      if (aDate && bDate && aDate !== bDate) return bDate - aDate;
-      const aId = mediaIdForPost(a.media).split('_')[0], bId = mediaIdForPost(b.media).split('_')[0];
-      if (aId && bId) return BigInt(aId) < BigInt(bId) ? 1 : BigInt(aId) > BigInt(bId) ? -1 : 0;
-      return a.order - b.order;
-    };
-    const area = group => Math.max(0, ...group.entries.map(entry => entry.width * entry.height));
-    const sort = state.settings.sort;
-    groups.sort((a, b) => {
-      if (sort === 'newest' || sort === 'oldest') return (sort === 'oldest' ? -1 : 1) * compareAge(a, b) || a.order - b.order;
-      if (sort === 'largest' || sort === 'smallest') {
-        const aa = area(a), bb = area(b);
-        if (!aa || !bb) return aa ? -1 : bb ? 1 : a.order - b.order;
-        return (sort === 'smallest' ? aa - bb : bb - aa) || a.order - b.order;
-      }
-      const ar = native.profileOrder.get(postKey(a.media)), br = native.profileOrder.get(postKey(b.media));
-      return (ar ?? Number.MAX_SAFE_INTEGER) - (br ?? Number.MAX_SAFE_INTEGER) || a.order - b.order;
-    });
-    state.media = groups.flatMap(group => group.entries);
-    let cursor = ui.gallery.firstChild;
-    state.media.forEach((entry, index) => {
-      entry.card.dataset.index = String(index);
-      if (entry.card !== cursor) ui.gallery.insertBefore(entry.card, cursor);
-      cursor = entry.card.nextSibling;
-    });
-    state.stats.images = state.media.filter(entry => entry.type === 'image').length;
-    state.stats.videos = state.media.length - state.stats.images;
-    state.stats.carousels = groups.filter(group => group.carousel).length;
-    ui.syncViewer(selectedId);
-  }
-
-  async function refreshedSources(entry, signal) {
-    const route = detectRoute();
-    const cached = routeCache(route).items.get(entry.shortcode)?.media;
-    function sourcesOf(parent) {
-      if (!parent) return [];
-      const children = postShape(parent).children.length ? postShape(parent).children : [parent];
-      const child = children.find(item => entry.mediaId && String(item.pk || item.id) === entry.mediaId)
-        || children[entry.carouselIndex];
-      return entry.type === 'video' ? videoCandidates(child) : imageCandidates(child);
-    }
-    const fromPage = sourcesOf(cached);
-    if (fromPage.some(source => !entry.sources.some(old => old.url === source.url))) return fromPage;
-    const id = entry.postId || entry.mediaId;
-    if (!/^\d+(?:_\d+)?$/.test(id)) return [];
-    if (!refreshRequests.has(id)) {
-      const url = new URL(`/api/v1/media/${encodeURIComponent(id)}/info/`, location.origin).href;
-      const request = requestJson(url, { headers: headers(), signal }).then(json => {
-        if (json?.status === 'fail' || !Array.isArray(json?.items)) throw new Error('Instagram did not return refreshed media.');
-        return json.items[0];
-      }).catch(error => {
-        if (error?.status) recordNativeFailure(new URL(url), error.status);
-        throw error;
-      });
-      refreshRequests.set(id, request);
-    }
-    return sourcesOf(await refreshRequests.get(id));
-  }
-
-  function setSourceWithFallback(element, entry, poster = false) {
-    mediaBindings.get(element)?.();
-    let candidates = poster ? [{ url: entry.posterUrl }].filter(item => item.url) : entry.sources;
-    candidates = [...new Map(candidates.map(source => [source.url, source])).values()];
-    const preferred = candidates.findIndex(source => source.url === entry.mediaUrl);
-    if (preferred > 0) candidates = [candidates[preferred], ...candidates.filter((_, index) => index !== preferred)];
-    const tried = new Set();
-    const generation = state.generation;
-    const controller = new AbortController();
-    let active = true;
-    let recovering = false;
-    let refreshed = false;
-    let failed = false;
-    let candidate;
-    const dispose = () => {
-      active = false;
-      controller.abort();
-      element.removeEventListener('error', onError);
-      element.removeEventListener('load', onReady);
-      element.removeEventListener('loadedmetadata', onReady);
-    };
-    const onReady = () => {
-      if (!active) return;
-      entry.card?.classList.remove('broken');
-      if (failed) { state.stats.failures = Math.max(0, state.stats.failures - 1); failed = false; }
-      if (!poster && candidate) {
-        entry.mediaUrl = candidate.url;
-        entry.width = candidate.width || entry.width;
-        entry.height = candidate.height || entry.height;
-      }
-    };
-    const finalError = () => {
-      if (!active || generation !== state.generation || failed) return;
-      failed = true;
-      state.stats.failures += 1;
-      entry.card?.classList.add('broken');
-      element.title = 'Instagram could not load this media. Open the original post to check it.';
-      ui.refresh();
-    };
-    const apply = () => {
-      if (!active || generation !== state.generation) return;
-      candidate = candidates.find(source => !tried.has(source.url));
-      if (!candidate) return false;
-      tried.add(candidate.url);
-      element.src = candidate.url;
-      return true;
-    };
-    const onError = async () => {
-      if (!active || recovering || generation !== state.generation) return;
-      if (apply()) return;
-      if (!poster && !refreshed) {
-        refreshed = true;
-        recovering = true;
-        try {
-          const fresh = await refreshedSources(entry, controller.signal);
-          if (!active || generation !== state.generation) return;
-          candidates = [...candidates, ...fresh];
-          if (fresh.length) entry.sources = fresh;
-          if (apply()) return;
-        } catch (_) {}
-        finally { recovering = false; }
-      }
-      finalError();
-    };
-    mediaBindings.set(element, dispose);
-    element.referrerPolicy = 'no-referrer';
-    element.addEventListener('error', onError);
-    element.addEventListener('load', onReady);
-    element.addEventListener('loadedmetadata', onReady);
-    if (!apply()) finalError();
-  }
-
-  function sanitizeFilename(value) {
-    return String(value || '').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_').replace(/\s+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80) || 'instagram';
-  }
-
-  function extensionFor(entry) {
-    if (entry.type === 'video') return 'mp4';
-    try {
-      const extension = new URL(entry.mediaUrl).pathname.match(/\.([a-zA-Z0-9]{2,5})$/)?.[1]?.toLowerCase();
-      return ['jpg', 'jpeg', 'png', 'webp', 'avif'].includes(extension) ? extension : 'jpg';
-    } catch (_) {
-      return 'jpg';
-    }
-  }
-
-  function filenameFor(entry) {
-    const user = sanitizeFilename(entry.username || 'instagram');
-    const code = sanitizeFilename(entry.shortcode || entry.id);
-    const slide = entry.carouselTotal > 1 ? `_${String(entry.carouselIndex + 1).padStart(2, '0')}` : '';
-    return `${user}_${code}${slide}.${extensionFor(entry)}`;
-  }
-
-  function managerDownload(url, name) {
-    return new Promise((resolve, reject) => {
-      if (typeof GM_download !== 'function') return reject(new Error('Manager download unavailable'));
-      try {
-        GM_download({ url, name, saveAs: false, timeout: 120000,
-          onload: resolve,
-          onerror: () => reject(new Error('Manager download failed')),
-          ontimeout: () => reject(new Error('Download timed out')) });
-      } catch (error) { reject(error); }
-    });
-  }
-
-  async function downloadBlob(url) {
-    let blob;
-    if (typeof GM_xmlhttpRequest === 'function') {
-      blob = await new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({ method: 'GET', url, responseType: 'blob', timeout: 120000,
-          onload: response => response.status >= 200 && response.status < 300
-            ? resolve(response.response) : reject(new Error(`HTTP ${response.status}`)),
-          onerror: () => reject(new Error('Media download failed')),
-          ontimeout: () => reject(new Error('Download timed out')) });
-      });
-    } else {
-      const response = await (originalFetch || win.fetch.bind(win))(url, { credentials: 'omit', referrerPolicy: 'no-referrer' });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      blob = await response.blob();
-    }
-    if (!blob || !blob.size || (blob.type && !/^(image\/|video\/|application\/octet-stream)/i.test(blob.type))) {
-      throw new Error('Instagram returned no downloadable media');
-    }
-    return blob;
-  }
-
-  function saveBlob(blob, name) {
-    const url = URL.createObjectURL(blob);
-    const anchor = doc.createElement('a');
-    anchor.href = url;
-    anchor.download = name;
-    doc.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
-  }
-
-  async function downloadEntry(entry) {
-    if (!entry || entry.downloadState === 'running') {
-      if (entry) ui.toast('That download is already running.', 'warning');
-      return;
-    }
-
-    entry.downloadState = 'running';
-    ui.toast(`${entry.type === 'video' ? 'Video' : 'Image'} download started.`, 'info');
-    const tried = new Set();
-    let failure;
-    try {
-      if (!entry.postComplete) {
-        const job = state.detailJobs.get(entry.postKey);
-        if (job?.status === 'loading') await job.promise;
-        if (!entry.postComplete) throw new Error('The full post is still unavailable; retry incomplete posts first');
-      }
-      let candidates = [{ url: entry.mediaUrl }, ...entry.sources];
-      for (let pass = 0; pass < 2; pass += 1) {
-        for (const candidate of candidates) {
-          if (!candidate.url || tried.has(candidate.url)) continue;
-          tried.add(candidate.url);
-          const name = filenameFor({ ...entry, mediaUrl: candidate.url });
-          try {
-            try { await managerDownload(candidate.url, name); }
-            catch (_) { saveBlob(await downloadBlob(candidate.url), name); }
-            entry.mediaUrl = candidate.url;
-            entry.downloadState = 'done';
-            ui.toast(`Download sent to browser: ${name}`, 'success', 3500);
-            return;
-          } catch (error) { failure = error; }
-        }
-        if (pass === 0) candidates = await refreshedSources(entry);
-      }
-      throw failure || new Error('No downloadable media URL is available');
-    } catch (error) {
-      entry.downloadState = 'idle';
-      ui.toast(`Download failed: ${error.message || error}. Open the original post and try again.`, 'error', 5000);
-    }
-  }
-
-  async function toggleLoadAll() {
-    if (state.loadAll) {
-      state.loadAll = false;
-      state.autoPaused = true;
-      state.userPaused = true;
-      state.controller?.abort();
-      win.clearTimeout(state.autoTimer);
-      state.autoTimer = null;
-      ui.toast('Load all stopped.', 'warning');
-      ui.refresh();
-      return;
-    }
-
-    state.loadAll = true;
-    state.autoPaused = false;
-    state.userPaused = false;
-    ui.toast('Loading every available page. Press Stop to cancel.', 'info', 4000);
-    ui.refresh();
-
-    while (state.loadAll && state.opened && !state.exhausted) {
-      if (state.loading) { await new Promise(resolve => setTimeout(resolve, 100)); continue; }
-      const result = await loadNextPage();
-      if (result?.error || result?.aborted || result?.stale || result?.waiting || result?.busy) break;
-      if (!state.hasMore) break;
-      await new Promise(resolve => setTimeout(resolve, 450));
-    }
-
-    const missing = incompletePosts().length;
-    const completed = state.loadAll && state.exhausted && !missing;
-    state.loadAll = false;
-    if (!completed) state.autoPaused = true;
-    ui.toast(completed ? `Load all complete: ${state.media.length} media items.` : missing ? `Loaded ${state.media.length} media; ${missing} posts are incomplete.` : 'Load all stopped.', completed ? 'success' : 'warning', 4000);
-    ui.refresh();
-  }
-
-  function copyText(text, label = 'Copied') {
-    try {
-      if (typeof GM_setClipboard === 'function') GM_setClipboard(text, 'text');
-      else return navigator.clipboard.writeText(text).then(() => ui.toast(label, 'success')).catch(() => ui.toast('Copy failed.', 'error'));
-      ui.toast(label, 'success');
-    } catch (_) {
-      ui.toast('Copy failed.', 'error');
-    }
-  }
-
-  function exportUrls() {
-    const lines = state.media.map((entry, index) => [
-      index + 1,
-      entry.type,
-      entry.username ? `@${entry.username}` : '',
-      entry.postUrl,
-      entry.mediaUrl,
-      entry.caption.replace(/\s+/g, ' ').trim(),
-    ].join('\t'));
-    copyText(['#\ttype\tuser\tpostUrl\tmediaUrl\tcaption', ...lines].join('\n'), `Copied ${state.media.length} media rows.`);
-  }
-
-  function createUI() {
-    const host = doc.createElement('div');
-    host.id = 'ig-full-size-gallery-host';
-    host.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none';
-    doc.documentElement.appendChild(host);
-    const root = host.attachShadow({ mode: 'open' });
-
-    root.innerHTML = `
-      <style>${styles()}</style>
-      <button class="launcher" type="button"><b>IG</b><span>Gallery</span></button>
-      <section class="app hidden" data-theme="dark" data-layout="fit" data-filter="all" data-captions="off" data-size="large" data-thumbnails="contain">
-        <header class="toolbar">
-          <div class="brand"><strong>IG Gallery ${VERSION}</strong><span class="pill mode">idle</span><span class="pill count">0 media</span></div>
-          <div class="controls">
-            <button data-action="layout">Layout: Fit</button>
-            <select data-setting="sort" aria-label="Sort posts" title="All sorts show the same media. Instagram grid order includes pinned posts; newest first sorts by date."><option value="profile">Instagram grid (pins first)</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="largest">Largest resolution</option><option value="smallest">Smallest resolution</option></select>
-            <button data-action="filter">Filter: All</button>
+    refreshRequests.clear();…6558 tokens truncated…ton>
             <button data-action="captions">Captions: Off</button>
             <button data-action="autoload">Auto: On</button>
             <button data-action="load">Load more</button>
@@ -2082,12 +1546,10 @@
         saveSettings(); applySettings();
       }
       if (action === 'autoload') {
-        state.settings.autoLoad = !state.settings.autoLoad;
-        if (state.settings.autoLoad) { state.autoPaused = false; state.userPaused = false; }
-        saveSettings(); applySettings();
+        toggleAutoLoad();
         toast(`Auto-load ${state.settings.autoLoad ? 'enabled' : 'disabled'}.`, 'success');
       }
-      if (action === 'load') { state.userPaused = false; loadNextPage(); }
+      if (action === 'load') { state.userPaused = false; loadNextPage(false, true); }
       if (action === 'load-all') toggleLoadAll();
       if (action === 'retry-posts') retryIncompletePosts();
       if (action === 'export') exportUrls();
@@ -2262,15 +1724,19 @@
     `;
   }
 
+  function toggleAutoLoad() {
+    state.settings.autoLoad = !state.settings.autoLoad;
+    if (state.settings.autoLoad) { state.autoPaused = false; state.userPaused = false; }
+    else { win.clearTimeout(state.autoTimer); state.autoTimer = null; }
+    saveSettings();
+    ui?.applySettings();
+  }
+
   function registerMenus() {
     if (typeof GM_registerMenuCommand !== 'function') return;
     GM_registerMenuCommand(`Open Instagram Gallery ${VERSION}`, () => ui.open());
     GM_registerMenuCommand('Copy gallery diagnostics', () => copyText(diagnosticReport()));
-    GM_registerMenuCommand('Toggle automatic loading', () => {
-      state.settings.autoLoad = !state.settings.autoLoad;
-      saveSettings();
-      ui?.refresh();
-    });
+    GM_registerMenuCommand('Toggle automatic loading', toggleAutoLoad);
     GM_registerMenuCommand('Reset gallery settings', () => {
       state.settings = { ...DEFAULTS };
       saveSettings();

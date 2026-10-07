@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [2.2.1] - 2026-10-08
+
+### Fixed
+
+- Preserve the inferred form content type of captured URLSearchParams bodies and merge replay headers case-insensitively, preventing duplicate authentication/app header values.
+- Share the Auto toggle between the gallery and userscript menu. Enabling it clears Stop's pause and schedules loading; disabling it cancels its pending timer.
+- Make explicit Load more/Load all retries restart a terminal count gap from the first page, through captured pagination or native scrolling. Keep known media and pause again if the gap remains instead of looping automatically.
+
+### Validation
+
+- Seven focused regressions cover inferred form bodies, Headers/mixed-case objects, menu resume after disabling/Stop, cursor-chain recovery, native-grid recovery, and bounded retry of an unchanged count gap.
+- Chromium fixtures validate the actual outgoing form content type and captured headers, including overriding differently cased default headers.
+
 ## [2.2.0] - 2026-10-06
 
 ### Changed

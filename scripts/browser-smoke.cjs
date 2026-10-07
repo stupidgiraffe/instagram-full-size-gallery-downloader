@@ -41,13 +41,19 @@ const feed = page => ({data:{node:{username:'alice',pk:'777',media_count:totalPo
     assert.equal(form.get('doc_id'),'browser-observed-document');
     assert.equal(variables.username,'alice');
     assert.equal(variables.providerFlag,true);
+    const captured=req.headers();
+    assert.match(captured['content-type'],/^application\/x-www-form-urlencoded(?:;|$)/i);
+    assert.equal(captured['x-csrftoken'],'captured-csrf');
+    assert.equal(captured['x-ig-app-id'],'captured-app');
+    assert.equal(captured['x-requested-with'],'XMLHttpRequest');
     const index=variables.after?Number(variables.after.split('-')[1]):0;
     requests.push({type:'profile',cursor:variables.after});
     return route.fulfill({json:feed(index)});
    }
    if(url.pathname==='/alice/')return route.fulfill({contentType:'text/html',body:`<!doctype html><html><body><main><h1>Sanitized profile fixture</h1></main><script>
     window.__nativeReady=false;
-    setTimeout(async()=>{const request=new Request(new URL('/api/graphql',location.href),{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':'PolarisProfilePosts'},body:new URLSearchParams({doc_id:'browser-observed-document',variables:JSON.stringify({username:'alice',after:null,first:12,providerFlag:true})})});await fetch(request);window.__requestConsumed=request.bodyUsed;window.__nativeReady=true},900);
+    window._sharedData={config:{csrf_token:'default-csrf'}};
+    setTimeout(async()=>{const request=new Request(new URL('/api/graphql',location.href),{method:'POST',headers:new Headers({'X-CSRFToken':'captured-csrf','X-IG-App-ID':'captured-app','X-Requested-With':'XMLHttpRequest','X-FB-Friendly-Name':'PolarisProfilePosts'}),body:new URLSearchParams({doc_id:'browser-observed-document',variables:JSON.stringify({username:'alice',after:null,first:12,providerFlag:true})})});await fetch(request);window.__requestConsumed=request.bodyUsed;window.__nativeReady=true},900);
    </script></body></html>`});
    return route.abort();
   });
@@ -67,7 +73,7 @@ const feed = page => ({data:{node:{username:'alice',pk:'777',media_count:totalPo
   },expected.media,{timeout:60000});
   await page.locator('[data-action="diagnostics"]').click();
   const report=await page.evaluate(()=>JSON.parse(window.__clipboard));
-  assert.equal(report.version,'2.2.0');
+  assert.equal(report.version,'2.2.1');
   assert.equal(report.profileComplete,true);
   assert.equal(report.discoveredPosts,totalPosts);
   assert.equal(report.renderedMedia,expected.media);
@@ -94,7 +100,7 @@ const feed = page => ({data:{node:{username:'alice',pk:'777',media_count:totalPo
   assert.match(await page.locator('.viewer-media img').getAttribute('style'),/scale\(1.25\)/);
   await page.locator('[data-action="viewer-close"]').click();
   const output=process.env.IG_BROWSER_ARTIFACTS;
-  if(output){mkdirSync(output,{recursive:true});await page.screenshot({path:path.join(output,`profile-v2.2.0-${totalPosts}.png`)});}
+  if(output){mkdirSync(output,{recursive:true});await page.screenshot({path:path.join(output,`profile-v2.2.1-${totalPosts}.png`)});}
   await page.locator('[data-action="close"]').click();
   await page.locator('.launcher').click();
   assert.equal(await page.locator('.media-card').count(),expected.media);
